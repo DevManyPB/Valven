@@ -52,3 +52,19 @@ def texto_seguro(
         recortadas.append("")
         recortadas.append(f"… y {sobran:,} líneas más. Ábrelo en VS Code para verlo entero.")
     return "\n".join(recortadas)
+
+
+#: Longitud máxima de una frase de una sola línea (barra de estado, avisos).
+MAX_ETIQUETA = 160
+
+
+def etiqueta_segura(texto, *, maximo: int = MAX_ETIQUETA) -> str:
+    """Acorta un texto de una sola línea antes de ponerlo en una etiqueta.
+
+    Una etiqueta de Tk no ajusta el texto si no tiene ``wraplength``, así que
+    dibuja la línea entera de una vez. Basta con que a una de estas frases
+    llegue algo inesperadamente largo —la representación de un objeto, la
+    salida de un comando— para que la aplicación se caiga.
+    """
+    linea = " ".join(str(texto).split())
+    return linea if len(linea) <= maximo else f"{linea[:maximo]}…"

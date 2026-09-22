@@ -411,3 +411,72 @@ def test_ninguna_vista_recorre_el_disco_en_el_hilo_de_la_interfaz():
             if "discover_repos" in linea and "def " not in linea:
                 contexto = archivo.read_text(encoding="utf-8")
                 assert "threading.Thread" in contexto, f"{archivo.name}:{numero}"
+
+
+# --- el avance del análisis no puede desbordar la barra de estado ----------
+
+def test_el_avance_entrega_un_nombre_y_no_el_estado_entero(sandbox):
+    """Entregar aquí el RepoStatus completo hacía que la barra de estado
+    intentara dibujar su representación —más de 70.000 caracteres en un
+    proyecto con cientos de archivos— y tumbaba la aplicación."""
+    from src.analyzer import analyze_all
+
+    recibido = []
+    analyze_all([sandbox.a, sandbox.b], fetch=False,
+                on_progress=lambda hechos, total, nombre: recibido.append(nombre))
+
+    assert sorted(recibido) == ["equipo-a", "equipo-b"]
+    for nombre in recibido:
+        assert isinstance(nombre, str)
+        assert len(nombre) < 100
+
+
+def test_los_dos_motores_informan_del_avance_igual(sandbox):
+    """analyze_all y sync_engine.execute deben tener el mismo contrato."""
+    from src import sync_engine
+    from src.analyzer import analyze_all
+
+    del_analisis, de_la_ejecucion = [], []
+    analyze_all([sandbox.b], fetch=False,
+                on_progress=lambda h, t, n: del_analisis.append(type(n)))
+    sync_engine.execute(
+        sync_engine.plan_push([], "PC-MESA"), "PC-MESA",
+        on_progress=lambda h, t, n: de_la_ejecucion.append(type(n)),
+    )
+    assert del_analisis == [str]
+    assert de_la_ejecucion == [type(None)]   # el último aviso no lleva nombre
+
+
+def test_una_etiqueta_nunca_dibuja_una_linea_desmedida():
+    from src.ui import MAX_ETIQUETA, etiqueta_segura
+
+    assert etiqueta_segura("corto") == "corto"
+    largo = etiqueta_segura("x" * 100_000)
+    assert len(largo) == MAX_ETIQUETA + 1
+    assert largo.endswith("…")
+
+
+def test_la_etiqueta_aplana_los_saltos_de_linea():
+    """Una etiqueta de una línea no debe recibir texto multilínea."""
+    from src.ui import etiqueta_segura
+    assert etiqueta_segura("una\nfrase   con\n\nhuecos") == "una frase con huecos"
+
+
+def test_la_etiqueta_acepta_cualquier_objeto():
+    from src.ui import etiqueta_segura
+    from src.analyzer import RepoState, RepoStatus
+
+    estado = RepoStatus(name="x", path=Path("/x"), state=RepoState.UP_TO_DATE)
+    assert len(etiqueta_segura(estado)) <= 161
+
+
+def test_la_barra_de_estado_solo_se_escribe_desde_un_sitio():
+    """Todo pasa por _estado(), que acota el texto. Si alguien escribe en la
+    etiqueta directamente, se salta el filtro y la app puede caerse."""
+    texto = (RAIZ / "src" / "ui" / "app_window.py").read_text(encoding="utf-8")
+    escrituras = [
+        numero for numero, linea in enumerate(texto.splitlines(), 1)
+        if "estado_label.configure(" in linea
+    ]
+    assert len(escrituras) == 1, f"escrituras directas en las líneas {escrituras}"
+    assert "def _estado(" in texto

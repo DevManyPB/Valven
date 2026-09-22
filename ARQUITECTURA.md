@@ -248,7 +248,24 @@ aviso en silencio si la ventana ya se cerró.
 Hay una prueba que falla si alguna vista llama a `self.after(0, …)`
 directamente.
 
-### Todo texto de Git se acota antes de dibujarlo
+### Todo texto se acota antes de dibujarlo
+
+Este proyecto se cayó dos veces por lo mismo, y merece la pena contarlo
+porque el síntoma aparecía muy lejos de la causa.
+
+**La barra de estado.** `analyzer.analyze_all()` y `sync_engine.execute()`
+informan del avance con una llamada de la misma forma, pero una entregaba el
+nombre del repositorio y la otra el objeto `RepoStatus` completo. La barra
+hacía `f"… {nombre}…"`, así que en un proyecto con 622 archivos convertía el
+objeto entero en una cadena de **76.673 caracteres** y la metía en una
+etiqueta de una sola línea. El servidor gráfico se negaba a reservar ese mapa
+de píxeles y la aplicación moría con `X BadAlloc`.
+
+Hoy las dos llamadas entregan un nombre, `etiqueta_segura()` acorta a 160
+caracteres cualquier texto de una línea, y la barra de estado solo se escribe
+desde `VaivenApp._estado()`.
+
+**Las diferencias.**
 
 Tk reserva, para cada línea de un widget de texto, un mapa de píxeles tan
 ancho como la línea entera. Medido con `git diff` de un archivo de una sola

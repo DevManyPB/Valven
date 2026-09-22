@@ -504,8 +504,12 @@ def analyze_all(
 ) -> list[RepoStatus]:
     """Analiza varios repositorios en paralelo, sin bloquear a quien llama.
 
-    ``on_progress(hechos, total, estado)`` se invoca tras cada repositorio,
-    para que la interfaz muestre el avance (sección 2).
+    ``on_progress(hechos, total, nombre)`` se invoca tras cada repositorio,
+    para que la interfaz muestre el avance (sección 2). El tercer argumento
+    es el **nombre** del repositorio, igual que en ``sync_engine.execute``:
+    entregar aquí el estado completo hacía que la barra de estado intentara
+    dibujar la representación entera del objeto, que en un repositorio con
+    cientos de archivos pasa de 70.000 caracteres.
     """
     paths = list(paths)
     total = len(paths)
@@ -531,5 +535,5 @@ def analyze_all(
                 )
             done += 1
             if on_progress:
-                on_progress(done, total, results[index])
+                on_progress(done, total, results[index].name)
     return results

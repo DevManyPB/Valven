@@ -442,3 +442,53 @@ congela»). Ahora los dos se calculan en segundo plano: la ventana de
 diferencias aparece al instante con «Calculando las diferencias…», y el
 recuento de proyectos de Ajustes muestra «Buscando proyectos…» mientras mira
 dentro de la carpeta elegida.
+
+### D37. La causa real del `BadAlloc`: el avance del análisis
+
+**Corrección de D35.** El recorte del texto de `git diff` (D35) era un
+problema real y sigue siendo necesario, pero **no era lo que tumbaba la
+aplicación**. El fallo se repitió al arrancar, sin que nadie tocara nada, con
+un número de serie de X mucho más bajo.
+
+**Causa.** Los dos motores informan del avance con una llamada de la misma
+forma, pero no entregaban lo mismo en el tercer argumento:
+
+```python
+sync_engine.execute()  →  on_progress(hechos, total, accion.name)   # una cadena
+analyzer.analyze_all() →  on_progress(hechos, total, results[i])    # ¡el objeto!
+```
+
+La barra de estado hacía `f"({hechos}/{total}) {nombre}…"`, de modo que al
+analizar convertía el `RepoStatus` entero en texto: sus contadores, su lista
+de archivos y sus commits. Medido en los repositorios reales del autor:
+
+| Proyecto | Archivos con cambios | Longitud del texto |
+|---|---|---|
+| `Monitorias` | 0 | 487 caracteres |
+| `Control2` | 35 | 4.598 caracteres |
+| **`IconicADV`** | **622** | **76.673 caracteres** |
+
+Esa cadena iba a una etiqueta de una sola línea. Tk intentaba reservar un
+mapa de píxeles de 76.000 caracteres de ancho y el servidor gráfico se
+negaba: `BadAlloc`. Por eso el fallo dependía del contenido de las carpetas
+del usuario y no se reprodujo en las pruebas de esfuerzo, que llamaban a
+`analyze_all` sin callback de progreso.
+
+**Decisión, en tres capas.**
+
+1. `analyze_all` entrega ahora el **nombre** del repositorio, igual que
+   `sync_engine.execute`. Dos llamadas con la misma forma deben significar lo
+   mismo; que no lo hicieran es lo que causó el fallo.
+2. `etiqueta_segura()` acorta a 160 caracteres cualquier texto destinado a
+   una etiqueta de una línea, y aplana los saltos de línea.
+3. La barra de estado solo se escribe desde `VaivenApp._estado()`, que aplica
+   ese filtro. Hay una prueba que falla si aparece una segunda escritura
+   directa sobre la etiqueta.
+
+La primera capa arregla el fallo; las otras dos impiden que vuelva por otra
+puerta. Verificado con los 8 proyectos reales: el análisis completo termina y
+la barra muestra 66 caracteres donde antes iban 76.673.
+
+**Lección.** Dos funciones con la misma firma y distinto significado son una
+trampa, y el síntoma apareció a mucha distancia de la causa: un error del
+servidor gráfico al reservar memoria, provocado por un `str()` implícito.

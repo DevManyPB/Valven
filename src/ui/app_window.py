@@ -15,7 +15,7 @@ import customtkinter as ctk
 from .. import analyzer, auth, config as config_module, github_api, safety, startup, sync_engine
 from ..analyzer import RepoStatus
 from ..logger import get_logger
-from . import call_on_ui_thread, theme
+from . import call_on_ui_thread, etiqueta_segura, theme
 from .login_view import LoginView
 from .preview_dialog import ask
 from .repo_detail_view import RepoDetailView
@@ -212,7 +212,19 @@ class VaivenApp(ctk.CTk):
             self.progreso.stop()
             self.progreso.grid_forget()
         if texto:
-            self.estado_label.configure(text=texto, text_color=theme.TEXT_MUTED)
+            self._estado(texto)
+
+    def _estado(self, texto, *, color=None) -> None:
+        """Único punto de escritura de la barra de estado.
+
+        Pasa siempre por ``etiqueta_segura``: es una etiqueta de una sola
+        línea, y basta con que le llegue algo inesperadamente largo para que
+        Tk intente dibujar un mapa de píxeles imposible y la aplicación se
+        caiga. Ninguna otra parte de la ventana debe tocar ``estado_label``.
+        """
+        self.estado_label.configure(
+            text=etiqueta_segura(texto), text_color=color or theme.TEXT_MUTED
+        )
 
     def _en_segundo_plano(self, trabajo, al_terminar, texto: str) -> None:
         if self._ocupado:
@@ -233,13 +245,14 @@ class VaivenApp(ctk.CTk):
     def _recoger(self, al_terminar, resultado, error) -> None:
         self._bloquear(False)
         if error is not None:
-            self.estado_label.configure(text=str(error), text_color=theme.DANGER)
+            self._estado(error, color=theme.DANGER)
             return
         al_terminar(resultado)
 
     def _avance(self, hechos: int, total: int, nombre) -> None:
-        texto = f"({hechos}/{total}) {nombre}…" if nombre else f"({hechos}/{total}) terminando…"
-        call_on_ui_thread(self, lambda: self.estado_label.configure(text=texto, text_color=theme.TEXT_MUTED))
+        etiqueta = etiqueta_segura(nombre, maximo=60) if nombre else ""
+        texto = f"({hechos}/{total}) {etiqueta}…" if etiqueta else f"({hechos}/{total}) terminando…"
+        call_on_ui_thread(self, self._estado, texto)
 
     # --- usuario y carpeta -------------------------------------------------
 
@@ -279,9 +292,7 @@ class VaivenApp(ctk.CTk):
             )
 
     def _pedir_carpeta(self) -> None:
-        self.estado_label.configure(
-            text="Todavía no has elegido tu carpeta de proyectos. Ábrela desde Ajustes.",
-        )
+        self._estado("Todavía no has elegido tu carpeta de proyectos. Ábrela desde Ajustes.")
         self._abrir_ajustes()
 
     def _abrir_ajustes(self) -> None:
@@ -311,8 +322,8 @@ class VaivenApp(ctk.CTk):
         rutas = self._repos_locales()
         if not rutas:
             self.lista.set_statuses([])
-            self.estado_label.configure(
-                text="No se han encontrado proyectos en esa carpeta."
+            self._estado(
+                "No se han encontrado proyectos en esa carpeta."
                 if self.config_data.root_folder else
                 "Elige tu carpeta de proyectos en Ajustes."
             )
@@ -339,9 +350,9 @@ class VaivenApp(ctk.CTk):
             partes.append(
                 f"{len(atencion)} necesita{'n' if len(atencion) != 1 else ''} tu atención"
             )
-        self.estado_label.configure(
-            text=" · ".join(partes) or "Todo está al día.",
-            text_color=theme.DANGER if atencion else theme.TEXT_MUTED,
+        self._estado(
+            " · ".join(partes) or "Todo está al día.",
+            color=theme.DANGER if atencion else theme.TEXT_MUTED,
         )
         safety.cleanup()
 
@@ -358,7 +369,7 @@ class VaivenApp(ctk.CTk):
 
         rutas = self._repos_locales()
         if not rutas:
-            self.estado_label.configure(text="No hay proyectos que subir.")
+            self._estado("No hay proyectos que subir.")
             return
 
         self._en_segundo_plano(
@@ -374,7 +385,7 @@ class VaivenApp(ctk.CTk):
         """Botón «⬇ Sincronizar todo» (secciones 6.5 y 8)."""
         rutas = self._repos_locales()
         if not rutas and not self.config_data.root_folder:
-            self.estado_label.configure(text="Elige tu carpeta de proyectos en Ajustes.")
+            self._estado("Elige tu carpeta de proyectos en Ajustes.")
             return
 
         def trabajo():
@@ -403,7 +414,7 @@ class VaivenApp(ctk.CTk):
     def _confirmar_y_ejecutar(self, plan: sync_engine.Plan) -> None:
         """Vista previa obligatoria antes de tocar nada (6.5)."""
         if not ask(self, plan, self.config_data.team_name):
-            self.estado_label.configure(text="Cancelado. No se ha tocado nada.")
+            self._estado("Cancelado. No se ha tocado nada.")
             return
 
         self._en_segundo_plano(
@@ -418,9 +429,9 @@ class VaivenApp(ctk.CTk):
     def _mostrar_resumen(self, informe: sync_engine.RunReport) -> None:
         """Resumen final de la sección 6.5.6."""
         ResultDialog(self, informe)
-        self.estado_label.configure(
-            text=informe.summary(),
-            text_color=theme.DANGER if informe.failed else theme.SUCCESS,
+        self._estado(
+            informe.summary(),
+            color=theme.DANGER if informe.failed else theme.SUCCESS,
         )
         self.revisar_estado()
 
@@ -430,9 +441,7 @@ class VaivenApp(ctk.CTk):
         dialogo = IdentityDialog(self)
         self.wait_window(dialogo)
         if not dialogo.result:
-            self.estado_label.configure(
-                text="Git necesita saber tu nombre y tu correo antes de guardar cambios."
-            )
+            self._estado("Git necesita saber tu nombre y tu correo antes de guardar cambios.")
             return False
         sync_engine.ensure_git_identity(*dialogo.result)
         return True
