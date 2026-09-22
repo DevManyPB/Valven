@@ -368,7 +368,8 @@ def test_los_repos_no_clonados_vienen_desmarcados(sandbox):
     assert plan.is_empty
 
 
-def test_clonar_lo_que_falta(sandbox, tmp_path):
+def test_clonar_lo_que_falta(sandbox, tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_engine, "CLONE_URL_PREFIXES", (str(sandbox.root),))
     destino = tmp_path / "raiz"
     destino.mkdir()
     plan = Plan(kind="sync", missing=[MissingRepo("clonado", str(sandbox.remote), selected=True)])
@@ -379,7 +380,8 @@ def test_clonar_lo_que_falta(sandbox, tmp_path):
     assert (destino / "clonado" / "README.md").exists()
 
 
-def test_clonar_no_pisa_una_carpeta_existente(sandbox, tmp_path):
+def test_clonar_no_pisa_una_carpeta_existente(sandbox, tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_engine, "CLONE_URL_PREFIXES", (str(sandbox.root),))
     destino = tmp_path / "raiz"
     (destino / "clonado").mkdir(parents=True)
     (destino / "clonado" / "mio.txt").write_text("no me toques\n", encoding="utf-8")
@@ -532,3 +534,61 @@ def test_dos_operaciones_no_coinciden_en_el_mismo_repo(sandbox):
 
     assert sync_repo(estado(sandbox.b), TEAM_B).ok
     assert undo(estado(sandbox.b)).ok   # deshacer restaura sin bloquearse a sí mismo
+
+
+# --- seguridad: avisos de secretos y clonado -------------------------------
+
+def test_avisa_de_un_env_que_ya_esta_en_un_commit_sin_subir(sandbox):
+    """El aviso no puede depender de si el usuario hizo commit antes."""
+    commit(sandbox.b, ".env", "API_KEY=secreto\n", "Añade configuración", TEAM_B)
+
+    plan = plan_push([estado(sandbox.b)], TEAM_B)
+
+    avisos = plan.to_do[0].warnings
+    assert [w.path for w in avisos] == [".env"]
+    assert "historial de GitHub" in avisos[0].detail
+    assert plan.has_secret_warnings
+
+
+def test_avisa_aunque_el_secreto_se_borrara_en_un_commit_posterior(sandbox):
+    commit(sandbox.b, "id_rsa", "clave\n", "Ups", TEAM_B)
+    git(sandbox.b, "rm", "-q", "id_rsa")
+    git(sandbox.b, "commit", "-qm", "Quita la clave")
+
+    plan = plan_push([estado(sandbox.b)], TEAM_B)
+
+    assert [w.path for w in plan.to_do[0].warnings] == ["id_rsa"]
+
+
+@pytest.mark.parametrize("contenido, que", [
+    ('TOKEN = "ghp_' + "a1B2" * 9 + '"\n', "token de GitHub"),
+    ("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n", "clave privada"),
+    ("aws_access_key_id = AKIA" + "ABCD2345EFGH6789" + "\n", "AWS"),
+    ("stripe = 'sk_live_" + "x" * 24 + "'\n", "Stripe"),
+])
+def test_avisa_de_credenciales_dentro_de_archivos_normales(sandbox, contenido, que):
+    write(sandbox.b, "src/config.py", "# configuración\n" + contenido)
+
+    avisos = plan_push([estado(sandbox.b)], TEAM_B).to_do[0].warnings
+
+    assert len(avisos) == 1 and avisos[0].is_secret
+    assert que in avisos[0].detail and "línea 2" in avisos[0].detail
+    assert contenido.strip() not in avisos[0].detail   # nunca se muestra el secreto
+
+
+def test_un_archivo_normal_no_avisa(sandbox):
+    write(sandbox.b, "src/app.py", "TOKEN = os.environ['GITHUB_TOKEN']\nclave = 'ghp_corto'\n")
+    assert not plan_push([estado(sandbox.b)], TEAM_B).has_secret_warnings
+
+
+@pytest.mark.parametrize("nombre, url", [
+    ("..", "https://github.com/u/r.git"),
+    ("../fuera", "https://github.com/u/r.git"),
+    ("repo", "--upload-pack=calc.exe"),
+    ("repo", "https://github.com.malo.com/u/r.git"),
+    ("repo", "http://github.com/u/r.git"),
+])
+def test_clonar_rechaza_nombres_y_direcciones_raros(tmp_path, nombre, url):
+    resultado = sync_engine.clone_repo(MissingRepo(nombre, url, selected=True), tmp_path)
+    assert not resultado.ok
+    assert list(tmp_path.iterdir()) == []

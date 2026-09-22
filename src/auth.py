@@ -22,6 +22,8 @@ OAuth App en GitHub y pegar aquí su Client ID y su Client Secret.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.server
 import json
 import os
@@ -74,11 +76,18 @@ def save_credentials(client_id: str = "", client_secret: str = "") -> Path:
         datos["client_id"] = client_id
     if client_secret:
         datos["client_secret"] = client_secret
-    destino.write_text(json.dumps(datos, indent=2), encoding="utf-8")
+    # Se crea ya con permisos de solo su dueño: escribir y luego hacer chmod
+    # deja un instante en el que otro usuario del equipo podría leerlo.
+    temporal = destino.with_name(f".{destino.name}.tmp")
+    temporal.unlink(missing_ok=True)
+    fd = os.open(temporal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        destino.chmod(0o600)   # solo su dueño puede leerlo
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as archivo:
+            json.dump(datos, archivo, indent=2)
+        os.replace(temporal, destino)
+    except BaseException:
+        temporal.unlink(missing_ok=True)
+        raise
     log.info("credenciales propias guardadas en %s", destino)
     return destino
 
@@ -259,8 +268,18 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
 
         consulta = urllib.parse.parse_qs(partes.query)
         servidor = self.server
+        state = (consulta.get("state") or [""])[0]
+        esperado = getattr(servidor, "expected_state", "") or ""
+        if not esperado or not secrets.compare_digest(state.encode(), esperado.encode()):
+            # Cualquier página abierta en el navegador puede visitar esta
+            # dirección. Sin el state correcto no es GitHub: se ignora y se
+            # sigue esperando, en vez de abortar el inicio de sesión.
+            log.warning("respuesta al login web con un state que no coincide; se ignora")
+            self.send_error(400)
+            return
+
+        servidor.state = state                                     # type: ignore[attr-defined]
         servidor.code = (consulta.get("code") or [None])[0]        # type: ignore[attr-defined]
-        servidor.state = (consulta.get("state") or [None])[0]      # type: ignore[attr-defined]
         servidor.error = (consulta.get("error_description") or consulta.get("error") or [None])[0]  # type: ignore[attr-defined]
 
         correcto = bool(servidor.code) and not servidor.error      # type: ignore[attr-defined]
@@ -282,12 +301,42 @@ class WebLogin:
 
     url: str
     state: str
+    verifier: str = field(default="", repr=False)   # PKCE (RFC 7636)
     _server: http.server.HTTPServer | None = field(default=None, repr=False)
 
     def close(self) -> None:
         if self._server is not None:
             self._server.server_close()
             self._server = None
+
+
+class _CallbackServer(http.server.HTTPServer):
+    """Servidor del callback que nadie más puede compartir.
+
+    ``HTTPServer`` activa ``SO_REUSEADDR``. En Windows eso no protege el
+    puerto: otro programa podría abrir el mismo y quedarse con la respuesta
+    de GitHub. Allí se pide el puerto en exclusiva (D43).
+    """
+
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        exclusivo = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if os.name == "nt" and exclusivo is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, exclusivo, 1)
+        super().server_bind()
+
+
+def _pkce_pair() -> tuple[str, str]:
+    """``code_verifier`` aleatorio y su ``code_challenge`` S256 (RFC 7636).
+
+    Aunque alguien interceptara el código que devuelve GitHub, no podría
+    canjearlo sin el verificador, que nunca sale de este proceso.
+    """
+    verificador = secrets.token_urlsafe(64)
+    resumen = hashlib.sha256(verificador.encode("ascii")).digest()
+    reto = base64.urlsafe_b64encode(resumen).rstrip(b"=").decode("ascii")
+    return verificador, reto
 
 
 def web_login_available(port: int = CALLBACK_PORT) -> bool:
@@ -316,7 +365,7 @@ def start_web_login(port: int = CALLBACK_PORT) -> WebLogin:
         )
 
     try:
-        servidor = http.server.HTTPServer((CALLBACK_HOST, port), _CallbackHandler)
+        servidor = _CallbackServer((CALLBACK_HOST, port), _CallbackHandler)
     except OSError as exc:
         raise PortUnavailable(
             f"El puerto {port} está ocupado; se usará el inicio de sesión por código."
@@ -328,14 +377,20 @@ def start_web_login(port: int = CALLBACK_PORT) -> WebLogin:
     servidor.error = None     # type: ignore[attr-defined]
 
     state = secrets.token_urlsafe(24)
+    servidor.expected_state = state   # type: ignore[attr-defined]
+    verificador, reto = _pkce_pair()
     consulta = urllib.parse.urlencode({
         "client_id": CLIENT_ID,
         "redirect_uri": f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}",
         "scope": SCOPES,
         "state": state,
+        "code_challenge": reto,
+        "code_challenge_method": "S256",
     })
     log.info("login web iniciado, escuchando en el puerto %s", port)
-    return WebLogin(url=f"{AUTHORIZE_URL}?{consulta}", state=state, _server=servidor)
+    return WebLogin(
+        url=f"{AUTHORIZE_URL}?{consulta}", state=state, verifier=verificador, _server=servidor
+    )
 
 
 def wait_for_authorization(
@@ -388,20 +443,24 @@ def wait_for_authorization(
         login.close()
 
 
-def exchange_code(code: str, session=None, *, port: int = CALLBACK_PORT) -> str:
-    """Canjea el código de autorización por la sesión (el token)."""
+def exchange_code(
+    code: str, session=None, *, port: int = CALLBACK_PORT, verifier: str | None = None
+) -> str:
+    """Canjea el código de autorización por la sesión (el token).
+
+    ``verifier`` es el ``code_verifier`` PKCE del intento (``WebLogin.verifier``).
+    """
     session = session or _session()
+    datos_peticion = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}",
+    }
+    if verifier:
+        datos_peticion["code_verifier"] = verifier
     try:
-        respuesta = session.post(
-            ACCESS_TOKEN_URL,
-            data={
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}",
-            },
-            timeout=HTTP_TIMEOUT,
-        )
+        respuesta = session.post(ACCESS_TOKEN_URL, data=datos_peticion, timeout=HTTP_TIMEOUT)
     except Exception as exc:
         raise AuthError("Se perdió la conexión con GitHub al iniciar sesión.") from exc
 

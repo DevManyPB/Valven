@@ -73,7 +73,7 @@ buscando atajos. Si las rompes, es a propósito o es un error.
 ## Ejecutar las pruebas
 
 ```bash
-.venv/bin/python -m pytest                 # las 313
+.venv/bin/python -m pytest                 # las 328
 .venv/bin/python -m pytest -k safety       # solo respaldos
 .venv/bin/python -m pytest -v tests/test_sync_scenarios.py
 ```

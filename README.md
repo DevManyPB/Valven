@@ -6,7 +6,7 @@
 
 **Mantén tus proyectos de GitHub iguales en dos ordenadores, con dos botones.**
 
-[![Pruebas](https://img.shields.io/badge/pruebas-313%20pasando-brightgreen)](tests/)
+[![Pruebas](https://img.shields.io/badge/pruebas-328%20pasando-brightgreen)](tests/)
 [![Licencia](https://img.shields.io/badge/licencia-MIT-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
 [![Plataforma](https://img.shields.io/badge/plataforma-Windows-lightgrey)](#crear-el-programa)
@@ -38,7 +38,8 @@ evite usarlos, es que `git_ops.py` los rechaza lanzando una excepción.
 - **Sincroniza todo** lo que haya nuevo en GitHub, solo donde es seguro.
 - **Se detiene** y te explica qué pasa cuando algo necesita tu decisión.
 - **Deshace** cualquier operación, y deshacer también se puede deshacer.
-- **Avisa** si estás a punto de subir un `.env` o una clave privada.
+- **Avisa** si estás a punto de subir un `.env`, una clave privada o un token
+  pegado en el código, aunque ya lo tuvieras en un commit.
 - **Inicia sesión** en GitHub desde el navegador, sin tokens que copiar.
 
 ## Cómo te protege
@@ -190,7 +191,7 @@ git clone https://github.com/DevManyPB/Valven.git
 cd Valven
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt     # Windows: .venv\Scripts\pip
-.venv/bin/python -m pytest                    # 313 pruebas, ~13 s
+.venv/bin/python -m pytest                    # 328 pruebas, ~13 s
 .venv/bin/python src/main.py                  # ejecutar sin empaquetar
 ```
 

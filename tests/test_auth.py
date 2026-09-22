@@ -383,18 +383,59 @@ def test_la_pagina_del_navegador_confirma_en_espanol():
     assert "volver a Vaivén" in paginas[0]
 
 
-def test_un_state_que_no_coincide_se_rechaza():
-    """Impide que otra página del navegador cuele una respuesta falsa."""
+def test_un_state_que_no_coincide_se_ignora_y_se_sigue_esperando():
+    """Otra página del navegador no puede colar una respuesta falsa, ni
+    tampoco abortar el inicio de sesión visitando la dirección antes que
+    GitHub (con un código, con un error o sin state)."""
     import threading as th
     puerto = _puerto_libre()
     intento = auth.start_web_login(port=puerto)
-    th.Timer(0.2, _responder, args=[
-        f"http://127.0.0.1:{puerto}/vaiven/callback?code=abc&state=inventado"
-    ]).start()
+    base = f"http://127.0.0.1:{puerto}/vaiven/callback"
 
-    with pytest.raises(auth.AuthError) as error:
-        auth.wait_for_authorization(intento, timeout=10)
-    assert "no coincide" in str(error.value)
+    def visitas():
+        _responder(f"{base}?code=falso&state=inventado")
+        _responder(f"{base}?error=access_denied")
+        _responder(f"{base}?code=falso")
+        _responder(f"{base}?code=bueno&state={intento.state}")
+
+    th.Timer(0.2, visitas).start()
+
+    assert auth.wait_for_authorization(intento, timeout=10) == "bueno"
+
+
+def test_el_login_web_usa_pkce():
+    import base64
+    import hashlib
+    import urllib.parse
+    intento = auth.start_web_login(port=_puerto_libre())
+    try:
+        consulta = urllib.parse.parse_qs(urllib.parse.urlsplit(intento.url).query)
+        esperado = base64.urlsafe_b64encode(
+            hashlib.sha256(intento.verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+        assert consulta["code_challenge_method"] == ["S256"]
+        assert consulta["code_challenge"] == [esperado]
+        assert 43 <= len(intento.verifier) <= 128
+        assert intento.verifier not in intento.url
+    finally:
+        intento.close()
+
+
+def test_el_verificador_pkce_se_envia_al_canjear():
+    sesion = SesionFalsa([RespuestaFalsa({"access_token": "gho_x"})])
+    auth.exchange_code("abc", sesion, verifier="verificador-secreto")
+    _, datos = sesion.peticiones[0]
+    assert datos["code_verifier"] == "verificador-secreto"
+
+
+def test_las_credenciales_propias_solo_las_lee_su_dueno(tmp_path, monkeypatch):
+    import os
+    import stat
+    monkeypatch.setenv("VAIVEN_DATA_DIR", str(tmp_path))
+    destino = auth.save_credentials("id", "secreto")
+    assert destino.read_text(encoding="utf-8").count("secreto") == 1
+    if os.name != "nt":
+        assert stat.S_IMODE(destino.stat().st_mode) == 0o600
 
 
 def test_si_el_usuario_cancela_en_la_web():

@@ -564,3 +564,50 @@ que ninguna ventana, presente o futura, pueda saltárselo. Es reentrante:
 * `try_merge` comprueba si puede continuar antes de crear el respaldo.
 * `ForbiddenGitCommand` guarda los argumentos en `git_args`: asignar
   `self.args` quedaba pisado por `Exception.__init__`.
+
+### D43. El callback del login web no se deja engañar ni interrumpir
+
+**Decisión.** Tres cambios en el servidor local de `127.0.0.1:49732`:
+
+1. **Solo cuenta la visita con el `state` correcto.** Antes, la primera
+   visita a la dirección decidía el resultado: cualquier página abierta en
+   el navegador podía abortar el inicio de sesión visitándola con un `state`
+   inventado o con `?error=...`. Ahora esas visitas reciben un 400 y el
+   servidor sigue esperando a GitHub. La comparación es de tiempo constante.
+2. **PKCE (RFC 7636, S256).** El `code_verifier` no sale del proceso: aunque
+   alguien interceptara el código que devuelve GitHub, no podría canjearlo.
+3. **Puerto en exclusiva en Windows.** `HTTPServer` activa `SO_REUSEADDR`,
+   y en Windows eso permite que otro programa abra el mismo puerto y se
+   quede con la respuesta. Allí se usa `SO_EXCLUSIVEADDRUSE`.
+
+`oauth.json` se crea con permisos `0600` desde el primer byte, en vez de
+escribirlo y hacer `chmod` después.
+
+### D44. Los avisos de secretos cubren los commits y el contenido
+
+**Decisión.** `find_warnings` revisa los cambios sin guardar **y** todos los
+archivos tocados por los commits pendientes de subir (`@{u}..HEAD`), y mira
+dentro de los archivos de texto de hasta 1 MB buscando formatos de
+credencial inequívocos.
+
+**Por qué.** El README promete avisar antes de subir un `.env`, pero el aviso
+solo miraba los archivos sin commit. Un `.env` que el usuario ya hubiera
+confirmado a mano se subía sin avisar, y lo mismo un token pegado en
+`config.py`, que no tiene nombre de secreto. Se miran todos los commits, no
+solo el resultado final: un archivo añadido en uno y borrado en el siguiente
+también se publica, porque queda en el historial. Vaivén no reescribe
+historial, así que el aviso lo explica y deja al usuario excluir el proyecto.
+
+**Coste.** Solo formatos sin ambigüedad (`ghp_` + 36 caracteres, cabeceras
+`PRIVATE KEY`, `AKIA...`), porque cada acierto bloquea la confirmación. Un
+falso positivo, como los tokens de ejemplo de las pruebas de Vaivén, se
+desbloquea con «Entiendo el riesgo». El aviso nunca muestra el secreto.
+
+### D45. `clone_repo` no confía a ciegas en la API
+
+**Decisión.** Antes de clonar se comprueba que el nombre solo tiene los
+caracteres que GitHub admite (así no puede salirse de la carpeta raíz con
+`..`) y que la dirección empieza por `https://github.com/`, que es adonde
+va el token. Además, la dirección va detrás de `--` para que Git nunca
+pueda leerla como una opción. Los datos vienen de la API de GitHub por
+HTTPS, así que es una defensa en profundidad, no un fallo explotable.

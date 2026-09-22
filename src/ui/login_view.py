@@ -123,7 +123,7 @@ class LoginView(ctk.CTkFrame):
             codigo = auth.wait_for_authorization(
                 intento, cancel=self._cancelar, on_wait=self._quedan
             )
-            token = auth.exchange_code(codigo)
+            token = auth.exchange_code(codigo, verifier=intento.verifier)
         except auth.CodeExpired as exc:
             call_on_ui_thread(self, self._caducado, str(exc))
             return

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fnmatch
 import functools
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -31,9 +32,32 @@ BIG_FILE_BYTES = 50 * 1024 * 1024
 
 #: Archivos que suelen contener secretos (sección 6.5).
 SECRET_PATTERNS = (
-    ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_dsa*", "id_ecdsa*",
+    ".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa*", "id_dsa*", "id_ecdsa*",
     "id_ed25519*", "credentials*.json", "*.pfx", "*.p12", "service-account*.json",
+    "*.ppk", "*.jks", "*.keystore", "*.kdbx", ".netrc", "_netrc", ".git-credentials",
+    ".npmrc", ".pypirc", "*.tfvars", "*.tfstate",
 )
+
+#: Contenido que delata una credencial aunque el archivo se llame de forma
+#: inocente (un token pegado en ``config.py``). Solo formatos inequívocos:
+#: cada acierto bloquea la confirmación hasta que el usuario acepte el riesgo.
+SECRET_CONTENT: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("un token de GitHub", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{60,})\b")),
+    ("una clave privada", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")),
+    ("una clave de acceso de AWS", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("una clave de API de Google", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("un token de Slack", re.compile(r"\bxox[abprs]-[0-9A-Za-z-]{10,}")),
+    ("una clave secreta de Stripe", re.compile(r"\b[rs]k_live_[0-9A-Za-z]{20,}")),
+)
+
+#: Los archivos más grandes no se leen al buscar credenciales.
+SCAN_MAX_BYTES = 1024 * 1024
+
+#: Caracteres que GitHub admite en el nombre de un repositorio.
+_SAFE_REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
+
+#: Solo se clona desde GitHub por HTTPS, que es adonde va el token (D9).
+CLONE_URL_PREFIXES: tuple[str, ...] = ("https://github.com/",)
 
 PUSH = "push"
 SYNC = "sync"
@@ -61,33 +85,88 @@ def looks_like_secret(path: str) -> bool:
     return any(fnmatch.fnmatch(nombre, patron) for patron in SECRET_PATTERNS)
 
 
+def secret_in_content(data: bytes) -> str | None:
+    """Qué credencial parece contener ``data`` y en qué línea, o ``None``.
+
+    Nunca devuelve la credencial en sí: el texto acaba en la pantalla.
+    """
+    if b"\0" in data[:8000]:
+        return None  # binario
+    texto = data.decode("utf-8", "replace")
+    for descripcion, patron in SECRET_CONTENT:
+        encontrado = patron.search(texto)
+        if encontrado:
+            linea = texto.count("\n", 0, encontrado.start()) + 1
+            return f"{descripcion} (línea {linea})"
+    return None
+
+
 def _is_ignored(repo: Path, path: str) -> bool:
     return git_ops.run(["check-ignore", "-q", "--", path], cwd=repo).returncode == 0
 
 
+def _outgoing_files(status: RepoStatus) -> list[str]:
+    """Archivos añadidos o cambiados en los commits que aún no están en GitHub.
+
+    Se miran **todos** los commits pendientes, no solo el resultado final: un
+    ``.env`` añadido en uno y borrado en el siguiente también se publicaría,
+    porque queda en el historial.
+    """
+    if not status.upstream or not status.ahead:
+        return []
+    listado = git_ops.run(
+        ["log", "--name-only", "--diff-filter=AMR", "--format=", "-z", "@{u}..HEAD"],
+        cwd=status.path,
+    )
+    if not listado.ok:
+        return []
+    return list(dict.fromkeys(nombre.strip("\n") for nombre in listado.stdout.split("\0") if nombre.strip()))
+
+
 def find_warnings(status: RepoStatus) -> list[Warning]:
-    """Archivos grandes o que parecen secretos entre los que se van a subir."""
-    avisos: list[Warning] = []
+    """Archivos grandes o con secretos entre los que se van a subir (6.5).
+
+    Cubre los cambios sin guardar **y** los commits pendientes de subir: los
+    dos acaban en GitHub al pulsar «Subir».
+    """
+    candidatos: dict[str, bool] = {}   # ruta -> ¿ya está en un commit?
     for cambio in status.files:
-        if cambio.change == "deleted":
-            continue
-        ruta = status.path / cambio.path
+        if cambio.change != "deleted":
+            candidatos[cambio.path] = False
+    for ruta in _outgoing_files(status):
+        candidatos.setdefault(ruta, True)
+
+    avisos: list[Warning] = []
+    for ruta_rel, en_commit in candidatos.items():
+        ruta = status.path / ruta_rel
         try:
             tamano = ruta.stat().st_size
         except OSError:
-            continue
-        if tamano >= BIG_FILE_BYTES:
+            tamano = None   # borrado después del commit: queda el nombre
+
+        if tamano is not None and tamano >= BIG_FILE_BYTES:
             avisos.append(Warning(
                 kind="archivo_grande",
-                path=cambio.path,
+                path=ruta_rel,
                 detail=f"Ocupa {tamano / (1024 * 1024):.0f} MB; GitHub rechaza los de más de 100 MB",
             ))
-        if looks_like_secret(cambio.path) and not _is_ignored(status.path, cambio.path):
-            avisos.append(Warning(
-                kind="secreto",
-                path=cambio.path,
-                detail="Este archivo suele contener contraseñas o claves privadas",
-            ))
+
+        if not en_commit and _is_ignored(status.path, ruta_rel):
+            continue
+        motivo = None
+        if looks_like_secret(ruta_rel):
+            motivo = "Este archivo suele contener contraseñas o claves privadas"
+        elif tamano is not None and tamano <= SCAN_MAX_BYTES:
+            try:
+                hallazgo = secret_in_content(ruta.read_bytes())
+            except OSError:
+                hallazgo = None
+            if hallazgo:
+                motivo = f"Contiene lo que parece {hallazgo}"
+        if motivo:
+            if en_commit:
+                motivo += ". Ya está en un commit sin subir: si lo subes, quedará en el historial de GitHub"
+            avisos.append(Warning(kind="secreto", path=ruta_rel, detail=motivo))
     return avisos
 
 
@@ -503,6 +582,19 @@ def sync_repo(status: RepoStatus, team: str, *, token: str | None = None) -> Rep
 
 def clone_repo(missing: MissingRepo, root: "str | Path", *, token: str | None = None) -> RepoResult:
     """Clona un repositorio que está en GitHub y no en este equipo (sección 8)."""
+    # El nombre y la dirección vienen de la API de GitHub. Aun así se
+    # comprueban: el nombre se convierte en carpeta y la dirección recibe el
+    # token, así que ninguno de los dos puede salirse de lo esperado.
+    if not _SAFE_REPO_NAME.fullmatch(missing.name) or missing.name in {".", ".."}:
+        return RepoResult(
+            missing.name, "clone", ok=False,
+            message="El nombre del repositorio no es válido como carpeta; no se ha tocado nada",
+        )
+    if not missing.clone_url.startswith(CLONE_URL_PREFIXES):
+        return RepoResult(
+            missing.name, "clone", ok=False,
+            message="La dirección del repositorio no es de GitHub; no se ha descargado",
+        )
     destino = Path(root) / missing.name
     if destino.exists():
         return RepoResult(
@@ -510,7 +602,7 @@ def clone_repo(missing: MissingRepo, root: "str | Path", *, token: str | None = 
             message="Ya existe una carpeta con ese nombre; no se ha tocado",
         )
     clonado = git_ops.run(
-        ["clone", missing.clone_url, str(destino)], cwd=root, token=token, timeout=600
+        ["clone", "--", missing.clone_url, str(destino)], cwd=root, token=token, timeout=600
     )
     if not clonado.ok:
         return RepoResult(missing.name, "clone", ok=False, message=_readable_error(clonado.stderr))

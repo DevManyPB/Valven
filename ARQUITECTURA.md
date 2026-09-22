@@ -209,9 +209,11 @@ previa y la ejecución pueden pasar minutos, así que:
   tanto **no sube nada**: marca el repositorio como Divergido.
 
 Los avisos de la vista previa detectan archivos de más de 50 MB (GitHub
-rechaza a partir de 100) y archivos que parecen secretos (`.env`, `*.pem`,
-`id_rsa*`, `credentials*.json`…) que no estén en `.gitignore`. Si hay
-secretos, el botón de confirmar queda deshabilitado hasta que el usuario los
+rechaza a partir de 100) y secretos, de dos maneras: por el nombre del
+archivo (`.env`, `*.pem`, `id_rsa*`, `credentials*.json`…) y por su contenido
+(tokens de GitHub, claves privadas, claves de AWS, Google, Slack o Stripe).
+Se revisan los cambios sin guardar **y** todos los commits pendientes de
+subir, porque los dos acaban en GitHub (D44). Si hay secretos, el botón de confirmar queda deshabilitado hasta que el usuario los
 excluya o marque «Entiendo el riesgo».
 
 ---
@@ -227,10 +229,11 @@ Hay dos caminos y la aplicación usa el primero que pueda:
 | Necesita un puerto libre | Sí (`127.0.0.1:49732`) | No |
 | Cuándo se usa | Si hay `oauth.json` propio | Por defecto, y si el puerto falla |
 
-**Por qué hacen falta los dos.** Las OAuth Apps de GitHub no admiten PKCE, el
-mecanismo estándar con el que una aplicación instalada puede canjear un
-código sin guardar ningún secreto. Sin PKCE, el canje exige `client_secret`.
-Un secreto en un repositorio público no es un secreto, así que:
+**Por qué hacen falta los dos.** Las OAuth Apps de GitHub exigen
+`client_secret` para canjear el código del login web, y un secreto en un
+repositorio público no es un secreto. El login web usa además PKCE y solo
+acepta la respuesta que trae el `state` de su propio intento (D43), pero eso
+no sustituye al secreto. Así que:
 
 - El repositorio trae solo el **Client ID público**, con el que el inicio de
   sesión por código funciona sin configurar nada.
@@ -288,7 +291,7 @@ inserta texto de Git sin pasarlo por ese filtro.
 
 ## Las pruebas
 
-313 pruebas, sin tocar GitHub ni ningún repositorio real.
+328 pruebas, sin tocar GitHub ni ningún repositorio real.
 
 ```
 tests/conftest.py            dos clones de un remoto bare local = dos equipos
