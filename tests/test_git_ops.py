@@ -70,6 +70,35 @@ PROHIBIDOS = [
     ["-c", "core.editor=true", "push", "--force"],
     ["-C", "/otro/repo", "reset", "--hard"],
     ["-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic x", "push", "-f"],
+    # huecos que tenía la lista negra
+    ["checkout", "HEAD", "src/main.py"],
+    ["checkout", "origin/main", "."],
+    ["checkout", "-B", "main", "origin/main"],
+    ["checkout", "-p"],
+    ["checkout", "--theirs", "archivo"],
+    ["switch", "-C", "main"],
+    ["branch", "-f", "main", "HEAD~3"],
+    ["branch", "--force", "main", "HEAD~3"],
+    ["branch", "-M", "otra", "main"],
+    ["branch", "-C", "otra", "main"],
+    ["update-ref", "refs/heads/main", "HEAD~3"],
+    ["update-ref", "HEAD", "HEAD~3"],
+    ["update-ref", "--stdin"],
+    ["symbolic-ref", "HEAD", "refs/heads/otra"],
+    ["symbolic-ref", "-d", "HEAD"],
+    ["remote", "remove", "origin"],
+    ["remote", "set-url", "origin", "https://otro"],
+    # fuera de la lista blanca
+    ["rm", "-rf", "."],
+    ["mv", "-f", "a", "b"],
+    ["worktree", "remove", "--force", "x"],
+    ["submodule", "deinit", "-f", "."],
+    ["merge", "-s", "ours", "origin/main"],
+    ["cherry-pick", "abc"],
+    ["am", "parche"],
+    ["apply", "--reject", "parche"],
+    ["read-tree", "-u", "--reset", "HEAD"],
+    ["prune"],
 ]
 
 PERMITIDOS = [
@@ -96,6 +125,11 @@ PERMITIDOS = [
     ["rev-list", "--left-right", "--count", "HEAD...@{u}"],
     ["clone", "https://github.com/usuario/repo.git", "destino"],
     ["update-ref", "refs/vaiven-backup/2026-09-22_120000_PORTATIL", "HEAD"],
+    ["update-ref", "refs/vaiven-backup/x", "abc", "-m", "antes de subir"],
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    ["remote", "get-url", "origin"],
+    ["checkout", "-b", "nueva", "origin/main"],
+    ["--version"],
 ]
 
 
@@ -154,6 +188,20 @@ def test_un_permiso_no_habilita_a_los_demas():
         validate_args(["push", "--force"], allow={ALLOW_REBASE_PULL, ALLOW_BACKUP_REF_DELETE})
 
 
+def test_restaurar_puede_cambiar_de_rama_solo_con_permiso():
+    permiso = {git_ops.ALLOW_BACKUP_RESTORE}
+    validate_args(["symbolic-ref", "HEAD", "refs/heads/otra"], allow=permiso)
+    validate_args(["update-ref", "--no-deref", "HEAD", "abc"], allow=permiso)
+    with pytest.raises(ForbiddenGitCommand):
+        validate_args(["update-ref", "refs/heads/main", "abc"], allow=permiso)
+
+
+def test_la_excepcion_conserva_los_argumentos():
+    with pytest.raises(ForbiddenGitCommand) as info:
+        validate_args(["push", "--force"])
+    assert info.value.git_args == ["push", "--force"]
+
+
 def test_permiso_desconocido_es_un_error_de_programacion():
     with pytest.raises(ValueError):
         validate_args(["status"], allow={"lo-que-sea"})
@@ -169,20 +217,45 @@ def test_la_cabecera_de_autenticacion_nunca_se_escribe_en_el_repositorio(sandbox
     assert "extraheader" not in config
 
 
-def test_los_argumentos_registrables_ocultan_el_token(sandbox):
+def test_el_token_no_va_en_la_linea_de_comandos(sandbox, monkeypatch):
+    """D38: la línea de comandos la puede leer cualquier proceso del equipo."""
+    import subprocess
+    lanzados = []
+    original = subprocess.run
+
+    def espia(cmd, *args, **kwargs):
+        lanzados.append(list(cmd))
+        return original(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", espia)
     resultado = git_ops.run(["status", "--porcelain=v2"], cwd=sandbox.b, token="token-secreto")
-    registrable = " ".join(resultado.safe_args)
-    assert "token-secreto" not in registrable
-    assert "<oculto>" in registrable
+    assert resultado.ok
+    basico = git_ops.auth_header("token-secreto").split()[-1]
+    for cmd in lanzados:
+        assert not any("token-secreto" in a or basico in a or "extraheader" in a for a in cmd)
+    assert "token-secreto" not in " ".join(resultado.safe_args)
 
 
-def test_auth_args_codifica_el_token_como_pide_la_seccion_5_3():
+def test_git_recibe_la_cabecera_por_el_entorno(sandbox):
+    resultado = git_ops.run(
+        ["config", "--get", git_ops.AUTH_CONFIG_KEY], cwd=sandbox.b, token="abc123"
+    )
+    assert resultado.out == git_ops.auth_header("abc123")
+    assert not git_ops.run(["config", "--get", git_ops.AUTH_CONFIG_KEY], cwd=sandbox.b).ok
+
+
+def test_auth_header_codifica_el_token_como_pide_la_seccion_5_3():
     import base64
-    args = git_ops.auth_args("abc123")
-    assert args[0] == "-c"
     esperado = base64.b64encode(b"x-access-token:abc123").decode()
-    assert args[1] == f"http.https://github.com/.extraheader=AUTHORIZATION: basic {esperado}"
-    assert git_ops.auth_args(None) == []
+    assert git_ops.auth_header("abc123") == f"AUTHORIZATION: basic {esperado}"
+    assert git_ops.auth_env(None) == {}
+
+
+def test_auth_env_respeta_la_configuracion_por_entorno_existente():
+    entorno = git_ops.auth_env("abc", {"GIT_CONFIG_COUNT": "2"})
+    assert entorno["GIT_CONFIG_COUNT"] == "3"
+    assert entorno["GIT_CONFIG_KEY_2"] == git_ops.AUTH_CONFIG_KEY
+    assert "GIT_CONFIG_KEY_0" not in entorno
 
 
 def test_check_lanza_excepcion_si_git_falla(sandbox):

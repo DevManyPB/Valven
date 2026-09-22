@@ -464,3 +464,71 @@ def test_los_errores_de_git_se_traducen():
     assert "internet" in sync_engine._readable_error("fatal: unable to access 'https://...'")
     assert "caducado" in sync_engine._readable_error("remote: Invalid credentials\nHTTP 401")
     assert "combinar" in sync_engine._readable_error("! [rejected] main -> main (non-fast-forward)")
+
+
+# --- regresiones de la revisión --------------------------------------------
+
+def test_guardar_aparte_no_saca_un_escondite_antiguo_del_usuario(sandbox):
+    """Si no hay nada que guardar, el «stash pop» no debe sacar el del usuario."""
+    commit(sandbox.a, "desde-a.txt", "novedad de A\n", "Cambio en A", TEAM_A)
+    sandbox.push(sandbox.a)
+    write(sandbox.b, "README.md", "idea que aparqué\n")
+    git(sandbox.b, "stash", "push", "-m", "escondite del usuario")
+    # El análisis queda viejo: cree que hay cambios, pero el usuario los
+    # esconde antes de pulsar el botón.
+    write(sandbox.b, "README.md", "otra cosa\n")
+    viejo = estado(sandbox.b)
+    git(sandbox.b, "stash", "push", "-m", "segundo escondite del usuario")
+    antes = git(sandbox.b, "stash", "list")
+
+    resultado = stash_and_sync(viejo, TEAM_B)
+
+    assert resultado.ok, resultado.message
+    assert git(sandbox.b, "stash", "list") == antes
+    assert (sandbox.b / "desde-a.txt").exists()
+    assert (sandbox.b / "README.md").read_text(encoding="utf-8") == "proyecto de prueba\n"
+
+
+def test_combinar_con_cambios_sin_guardar_no_crea_respaldo(sandbox):
+    write(sandbox.b, "borrador.txt", "a medias\n")
+    resultado = try_merge(estado(sandbox.b), TEAM_B)
+    assert resultado.skipped and resultado.backup_id is None
+    assert safety.list_backups(sandbox.b) == []
+
+
+def test_deshacer_una_subida_avisa_de_que_sigue_en_github(sandbox):
+    write(sandbox.b, "README.md", "readme editado\n")
+    assert push_repo(estado(sandbox.b), TEAM_B, "Sync desde PC-MESA").ok
+
+    deshecho = undo(estado(sandbox.b))
+
+    assert deshecho.ok
+    assert "sigue en GitHub" in deshecho.message
+
+
+def test_dos_operaciones_no_coinciden_en_el_mismo_repo(sandbox):
+    """Otra ventana trabajando en el repo: la segunda operación se omite."""
+    import threading
+    commit(sandbox.a, "desde-a.txt", "a\n", "Cambio en A", TEAM_A)
+    sandbox.push(sandbox.a)
+    dentro, salir = threading.Event(), threading.Event()
+
+    def ocupar():
+        with safety.repo_lock(sandbox.b):
+            dentro.set()
+            salir.wait(10)
+
+    hilo = threading.Thread(target=ocupar)
+    hilo.start()
+    dentro.wait(10)
+    try:
+        resultado = sync_repo(estado(sandbox.b), TEAM_B)
+        assert resultado.skipped and "otra operación" in resultado.message
+        with pytest.raises(safety.RepoBusy):
+            safety.restore_backup(safety.create_backup(sandbox.b, "x", TEAM_B))
+    finally:
+        salir.set()
+        hilo.join()
+
+    assert sync_repo(estado(sandbox.b), TEAM_B).ok
+    assert undo(estado(sandbox.b)).ok   # deshacer restaura sin bloquearse a sí mismo

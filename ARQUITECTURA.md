@@ -105,14 +105,17 @@ Un permiso no habilita a los demás. Hay pruebas que lo comprueban.
 
 ### Autenticación sin tocar el disco
 
-La sesión de GitHub viaja por línea de comandos y nunca se escribe en
-`.git/config`:
+La sesión de GitHub viaja en el entorno del proceso `git` y nunca se escribe
+en `.git/config` ni aparece en la línea de comandos:
 
 ```
-git -c http.https://github.com/.extraheader="AUTHORIZATION: basic <base64>" fetch
+GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+GIT_CONFIG_VALUE_0=AUTHORIZATION: basic <base64>
 ```
 
-Al registrar el comando, ese argumento se sustituye por `<oculto>`. Y por si
+Es lo mismo que `git -c http...extraheader=...`, pero la línea de comandos la
+puede leer cualquier proceso del equipo y el entorno no (D38). Y por si
 acaso, `logger.py` instala un filtro que censura tokens y cabeceras en
 **cualquier** mensaje, venga de donde venga.
 
@@ -285,11 +288,11 @@ inserta texto de Git sin pasarlo por ese filtro.
 
 ## Las pruebas
 
-259 pruebas, sin tocar GitHub ni ningún repositorio real.
+313 pruebas, sin tocar GitHub ni ningún repositorio real.
 
 ```
 tests/conftest.py            dos clones de un remoto bare local = dos equipos
-tests/test_git_ops.py        44 comandos destructivos rechazados, 23 permitidos
+tests/test_git_ops.py        71 comandos destructivos rechazados, 28 permitidos
 tests/test_analyzer.py       los 10 estados, cada uno provocado de verdad
 tests/test_safety.py         respaldar, estropear, restaurar, comparar
 tests/test_sync_scenarios.py los escenarios completos de dos equipos

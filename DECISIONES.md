@@ -492,3 +492,75 @@ la barra muestra 66 caracteres donde antes iban 76.673.
 **Lección.** Dos funciones con la misma firma y distinto significado son una
 trampa, y el síntoma apareció a mucha distancia de la causa: un error del
 servidor gráfico al reservar memoria, provocado por un `str()` implícito.
+
+### D38. El token viaja por el entorno, no por la línea de comandos
+
+**Decisión.** La cabecera de la sección 5.3 se pasa con `GIT_CONFIG_COUNT`,
+`GIT_CONFIG_KEY_<n>` y `GIT_CONFIG_VALUE_<n>` en lugar de `-c`. Git la trata
+exactamente igual, pero la línea de comandos de un proceso la puede leer
+cualquier otro programa del equipo (el Administrador de tareas, `ps`), y el
+entorno solo el mismo usuario. Si ya había variables `GIT_CONFIG_*`, la
+cabecera se añade detrás sin pisarlas.
+
+**Coste.** Exige Git 2.31 (marzo de 2021). Git for Windows actual lo cumple
+de sobra; el README lo indica.
+
+### D39. Lista blanca de subcomandos de Git
+
+**Decisión.** `validate_args` rechaza cualquier subcomando que no esté en
+`ALLOWED_COMMANDS`, además de las restricciones por opción que ya tenía.
+
+**Por qué.** Una revisión encontró comandos destructivos que la lista negra
+dejaba pasar: `checkout HEAD archivo` (sin `--`), `checkout -B`,
+`branch -f/-M/-C`, `update-ref refs/heads/main <sha>`, `rm -f`,
+`worktree remove --force`... Vaivén no los usaba, pero el README promete que
+están prohibidos. Una lista negra siempre tiene un hueco más; una lista
+blanca obliga a pensar cada comando nuevo antes de usarlo. Los huecos
+encontrados siguen cerrados también por opción, para que el mensaje explique
+el motivo concreto.
+
+`update-ref` y `symbolic-ref` solo pueden escribir referencias de respaldo;
+mover `HEAD` exige el permiso `ALLOW_BACKUP_RESTORE` (ver D40).
+
+### D40. Restaurar vuelve a la rama del respaldo
+
+**Decisión.** Si la rama actual no es la del respaldo, `restore_backup`
+apunta `HEAD` a la rama guardada (`symbolic-ref`, o `update-ref --no-deref`
+si el respaldo se hizo con HEAD suelto) antes del `reset --hard`.
+
+**Por qué.** El `reset --hard` movía la rama en la que estuviera el usuario.
+Respaldo en `main`, cambio a `feature`, restaurar: `feature` acababa
+apuntando al commit de `main`. El respaldo previo permitía recuperarlo, pero
+era justo el tipo de sorpresa que Vaivén existe para evitar. Cambiar solo
+`HEAD` no toca la carpeta; de eso se encarga el reset, y lo que hubiera en
+ella ya está en el respaldo previo.
+
+### D41. Una sola operación a la vez por repositorio
+
+**Decisión.** `safety.repo_lock()` reserva el repositorio durante cada
+operación que lo modifica (`push_repo`, `sync_repo`, `try_merge`,
+`stash_and_sync`, `undo`, `restore_backup`). Si ya está reservado, la
+operación se omite con un mensaje claro en lugar de esperar.
+
+**Por qué.** La ventana principal, la de detalle y la de respaldos lanzan
+hilos por su cuenta, y nada impedía restaurar un respaldo en mitad de un
+«Sincronizar todo». El cerrojo está en el motor y no en la interfaz para
+que ninguna ventana, presente o futura, pueda saltárselo. Es reentrante:
+«Deshacer» restaura sin bloquearse a sí mismo.
+
+### D42. Otras correcciones de la misma revisión
+
+* **«Guardar aparte y sincronizar» ya no saca escondites ajenos.** Sin
+  cambios, `git stash push` termina bien pero no guarda nada, y el
+  `stash pop` posterior sacaba el escondite más reciente del usuario. Ahora
+  se compara `refs/stash` antes y después, y solo se recupera lo propio.
+* **Ids de respaldo únicos.** Llevan un sufijo aleatorio: con precisión de
+  segundos, varios repos de «Subir todo» compartían id, y dos respaldos del
+  mismo repo en el mismo segundo se pisaban la referencia.
+* **Deshacer una subida lo dice claro.** Deshacer es local; lo subido sigue
+  en GitHub (nunca se fuerza un push). El mensaje ahora lo explica.
+* `files_saved` usa el mismo parser de `git status` que el análisis, que
+  respeta rutas con espacios y renombrados.
+* `try_merge` comprueba si puede continuar antes de crear el respaldo.
+* `ForbiddenGitCommand` guarda los argumentos en `git_args`: asignar
+  `self.args` quedaba pisado por `Exception.__init__`.

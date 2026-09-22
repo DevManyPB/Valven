@@ -258,7 +258,7 @@ def discover_repos(root: "str | Path", max_depth: int = DEFAULT_SCAN_DEPTH) -> l
 # Lectura del estado
 # --------------------------------------------------------------------------
 
-def _parse_porcelain_v2(output: str) -> list[FileChange]:
+def parse_porcelain_v2(output: str) -> list[FileChange]:
     """Convierte ``git status --porcelain=v2 -z`` en una lista de cambios."""
     changes: list[FileChange] = []
     fields = output.split("\0")
@@ -449,7 +449,7 @@ def analyze_repo(
         state_out = git_ops.run(
             ["status", "--porcelain=v2", "-z", "--untracked-files=all"], cwd=path
         )
-        status.files = _parse_porcelain_v2(state_out.stdout) if state_out.ok else []
+        status.files = parse_porcelain_v2(state_out.stdout) if state_out.ok else []
 
         if status.upstream:
             counts = git_ops.run(

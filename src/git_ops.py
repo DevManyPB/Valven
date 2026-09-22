@@ -8,8 +8,10 @@ Reglas adicionales que cumple siempre:
 
 * ``creationflags=CREATE_NO_WINDOW`` en Windows, para que el ``.exe`` no abra
   ventanas negras de consola (sección 2).
-* La autenticación viaja por línea de comandos con ``-c http...extraheader``
-  y nunca se escribe en ``.git/config`` ni en disco (sección 5.3).
+* La autenticación viaja en variables de entorno ``GIT_CONFIG_*`` (el
+  equivalente de ``-c http...extraheader``) y nunca se escribe en
+  ``.git/config`` ni en disco. Tampoco en la línea de comandos, que cualquier
+  proceso del equipo puede leer (sección 5.3 y decisión D38).
 * Tiempo máximo de 120 s por operación de red (sección 11).
 * Todo se registra en el log **sin** la cabecera de autenticación (sección 11).
 """
@@ -79,8 +81,8 @@ class ForbiddenGitCommand(GitError):
 
     def __init__(self, reason: str, args: "list[str] | tuple[str, ...]") -> None:
         self.reason = reason
-        self.args = list(args)
-        super().__init__(f"Comando de Git prohibido por seguridad: {reason} (git {' '.join(self.args)})")
+        self.git_args = list(args)
+        super().__init__(f"Comando de Git prohibido por seguridad: {reason} (git {' '.join(self.git_args)})")
 
 
 @dataclass
@@ -174,6 +176,27 @@ def _is_backup_ref(ref: str) -> bool:
     return ref.startswith(BACKUP_REF_PREFIX) or ref.startswith(BACKUP_BRANCH_PREFIX)
 
 
+#: Subcomandos que Vaivén puede ejecutar. Todo lo demás se rechaza aunque no
+#: figure abajo como destructivo: una lista blanca no tiene huecos que olvidar.
+ALLOWED_COMMANDS = frozenset({
+    # lectura
+    "status", "log", "rev-list", "rev-parse", "symbolic-ref", "cat-file",
+    "check-ignore", "config", "diff", "ls-files", "ls-tree", "for-each-ref",
+    "remote", "show", "merge-base",
+    # red
+    "fetch", "pull", "push", "clone",
+    # guardar trabajo
+    "add", "commit", "stash",
+    # respaldos (fontanería que solo escribe objetos y referencias nuevas)
+    "update-ref", "update-index", "write-tree", "commit-tree",
+    # ramas y combinaciones, con las restricciones de abajo
+    "checkout", "switch", "branch", "reset", "rebase",
+})
+
+#: Subcomandos de ``git remote`` que solo leen.
+_REMOTE_READ_ONLY = frozenset({"get-url", "show"})
+
+
 def validate_args(
     args: list[str] | tuple[str, ...],
     allow: "frozenset[str] | set[str] | tuple[str, ...]" = (),
@@ -234,26 +257,60 @@ def validate_args(
             deny("'git checkout --force' descarta los cambios sin guardar")
         if "--" in rest or _has_flag(rest, "--pathspec-from-file"):
             deny("'git checkout -- <ruta>' descarta los cambios sin guardar")
+        if _has_short(rest, "B") or _has_flag(rest, "--patch", "--ours", "--theirs", "--merge") or _has_short(rest, "p"):
+            deny("'git checkout -B/--patch/--ours/--theirs' puede descartar trabajo")
+        # «checkout <rama>» o «checkout -b <nueva> [<origen>]»; un operando
+        # más serían rutas, y «checkout HEAD archivo» sobrescribe el archivo.
+        maximo = 2 if _has_short(rest, "b") else 1
+        if len(_operands(rest)) > maximo:
+            deny("'git checkout <commit> <ruta>' sobrescribe archivos con cambios sin guardar")
     elif command == "switch":
         if _has_flag(rest, "--force", "--discard-changes") or _has_short(rest, "f"):
             deny("'git switch --force' descarta los cambios sin guardar")
+        if _has_flag(rest, "--force-create") or _has_short(rest, "C"):
+            deny("'git switch -C' mueve una rama existente y puede dejar commits huérfanos")
     elif command == "restore":
         deny("'git restore' descarta los cambios sin guardar")
 
     # --- branch: solo se borran ramas de respaldo -------------------------
     elif command == "branch":
-        force_delete = _has_flag(rest, "--delete") and (_has_flag(rest, "--force") or _has_short(rest, "f"))
-        if _has_short(rest, "D") or force_delete:
+        forced = _has_flag(rest, "--force") or _has_short(rest, "f")
+        deleting = _has_flag(rest, "--delete") or _has_short(rest, "d") or _has_short(rest, "D")
+        if _has_short(rest, "D") or (deleting and forced):
             targets = _operands(rest)
             if ALLOW_BACKUP_REF_DELETE not in allow or not targets or not all(map(_is_backup_ref, targets)):
                 deny("'git branch -D' solo se permite sobre ramas de respaldo de Vaivén caducadas")
+        elif forced or _has_short(rest, "M") or _has_short(rest, "C"):
+            deny("'git branch -f/-M/-C' mueve o pisa una rama existente")
 
     # --- update-ref: solo toca el espacio de respaldos --------------------
     elif command == "update-ref":
+        if _has_flag(rest, "--stdin"):
+            deny("'git update-ref --stdin' no se puede validar")
         if _has_flag(rest, "--delete") or _has_short(rest, "d"):
             targets = _operands(rest)
             if ALLOW_BACKUP_REF_DELETE not in allow or not targets or not all(map(_is_backup_ref, targets)):
                 deny("'git update-ref -d' solo se permite sobre referencias de respaldo de Vaivén")
+        else:
+            # El primer operando es la referencia que se escribe; lo que sigue
+            # es el valor nuevo y, tras -m, el motivo.
+            targets = _operands(rest)
+            target = targets[0] if targets else ""
+            restoring_head = target == "HEAD" and ALLOW_BACKUP_RESTORE in allow
+            if not (_is_backup_ref(target) or restoring_head):
+                deny("'git update-ref' solo puede escribir referencias de respaldo de Vaivén")
+
+    # --- symbolic-ref: leer sí; cambiar de rama solo al restaurar ----------
+    elif command == "symbolic-ref":
+        if _has_flag(rest, "--delete") or _has_short(rest, "d"):
+            deny("'git symbolic-ref -d' deja el repositorio sin HEAD")
+        if len(_operands(rest)) > 1 and ALLOW_BACKUP_RESTORE not in allow:
+            deny("'git symbolic-ref' solo cambia de rama al restaurar un respaldo")
+
+    elif command == "remote":
+        sub = next((item for item in rest if not item.startswith("-")), None)
+        if sub is not None and sub not in _REMOTE_READ_ONLY:
+            deny(f"'git remote {sub}' modifica los remotos del usuario")
 
     # --- el escondite guarda respaldos: no se vacía -----------------------
     elif command == "stash":
@@ -278,6 +335,9 @@ def validate_args(
         ):
             deny("'git gc --prune' puede eliminar objetos de los que dependen los respaldos")
 
+    if command not in ALLOWED_COMMANDS:
+        deny(f"'git {command}' no está entre los comandos que Vaivén puede usar")
+
 
 # --------------------------------------------------------------------------
 # Ejecución
@@ -288,12 +348,34 @@ def _creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
-def auth_args(token: str | None) -> list[str]:
-    """Argumentos ``-c`` que autentican la operación sin tocar el disco (5.3)."""
-    if not token:
-        return []
+AUTH_CONFIG_KEY = "http.https://github.com/.extraheader"
+
+
+def auth_header(token: str) -> str:
+    """Valor de la cabecera de la sección 5.3 para ``token``."""
     basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}"]
+    return f"AUTHORIZATION: basic {basic}"
+
+
+def auth_env(token: str | None, base: "dict[str, str] | None" = None) -> dict[str, str]:
+    """Variables ``GIT_CONFIG_*`` que autentican la operación (5.3, D38).
+
+    Equivalen a ``-c http...extraheader=...`` pero no aparecen en la línea de
+    comandos, que en Windows y Linux puede leer cualquier proceso del equipo.
+    Se añaden detrás de las que ya hubiera en ``base``, sin pisarlas.
+    """
+    if not token:
+        return {}
+    base = base if base is not None else os.environ
+    try:
+        index = int(base.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        index = 0
+    return {
+        "GIT_CONFIG_COUNT": str(index + 1),
+        f"GIT_CONFIG_KEY_{index}": AUTH_CONFIG_KEY,
+        f"GIT_CONFIG_VALUE_{index}": auth_header(token),
+    }
 
 
 def _safe_args(args: list[str]) -> list[str]:
@@ -338,7 +420,8 @@ def run(
 
     :param args: argumentos de git, sin el propio ``git``.
     :param cwd: carpeta del repositorio.
-    :param token: si se indica, se añade la cabecera de autenticación.
+    :param token: si se indica, se añade la cabecera de autenticación
+        (por el entorno, nunca por la línea de comandos).
     :param check: lanza :class:`GitCommandError` si el código de salida no es 0.
     :param allow: permisos explícitos (ver *permisos explícitos*).
     :param input_bytes: datos que se envían por la entrada estándar.
@@ -348,8 +431,10 @@ def run(
     args = list(args)
     validate_args(args, allow)
 
-    full = auth_args(token) + args
+    full = args
     safe = _safe_args(full)
+    entorno = _environment(env)
+    entorno.update(auth_env(token, entorno))
     workdir = str(cwd) if cwd is not None else None
 
     log.debug("ejecutando: git %s (en %s)", " ".join(shlex.quote(a) for a in safe), workdir or ".")
@@ -365,7 +450,7 @@ def run(
             encoding="utf-8" if text_mode else None,
             errors="replace" if text_mode else None,
             timeout=timeout,
-            env=_environment(env),
+            env=entorno,
             creationflags=_creation_flags(),
             input=input_bytes if input_bytes is not None else None,
             stdin=None if input_bytes is not None else subprocess.DEVNULL,

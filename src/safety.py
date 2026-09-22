@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import stat
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import config, git_ops
+from . import analyzer, config, git_ops
 from .git_ops import (
     ALLOW_BACKUP_REF_DELETE,
     ALLOW_BACKUP_RESTORE,
@@ -42,11 +44,52 @@ RETENTION_COUNT = 20
 
 INDEX_VERSION = 1
 
+#: Motivo de los respaldos que crea una restauración; «deshacer» los salta.
+RESTORE_REASON_PREFIX = "antes de restaurar"
+#: Motivo del respaldo previo a «Subir»; deshacerlo no borra nada de GitHub.
+PUSH_REASON = "antes de subir"
+
 _index_lock = threading.Lock()
 
 
 class BackupError(GitError):
     """No se pudo crear o restaurar un respaldo."""
+
+
+class RepoBusy(GitError):
+    """Ya hay otra operación de Vaivén en marcha sobre ese repositorio."""
+
+
+# --------------------------------------------------------------------------
+# Una sola operación por repositorio
+# --------------------------------------------------------------------------
+# La ventana principal, la de detalle y la de respaldos lanzan operaciones en
+# hilos propios. Sin este cerrojo, «Restaurar» podría coincidir con un
+# «Sincronizar todo» sobre el mismo repo y pisarse los dos.
+
+_repo_locks: dict[str, threading.RLock] = {}
+_repo_locks_guard = threading.Lock()
+
+
+@contextmanager
+def repo_lock(repo_path: "str | Path"):
+    """Reserva el repositorio o lanza :class:`RepoBusy` sin esperar.
+
+    Es reentrante en el mismo hilo: «Deshacer» puede restaurar un respaldo
+    sin bloquearse a sí mismo.
+    """
+    clave = os.path.normcase(str(Path(repo_path).resolve()))
+    with _repo_locks_guard:
+        cerrojo = _repo_locks.setdefault(clave, threading.RLock())
+    if not cerrojo.acquire(blocking=False):
+        raise RepoBusy(
+            f"Ya hay otra operación en marcha en «{Path(repo_path).name}». "
+            "Espera a que termine y vuelve a intentarlo."
+        )
+    try:
+        yield
+    finally:
+        cerrojo.release()
 
 
 @dataclass
@@ -151,12 +194,17 @@ def _remove_from_index(backup_ids: set[str]) -> None:
 
 
 def list_backups(repo_path: "str | Path | None" = None) -> list[Backup]:
-    """Respaldos existentes, del más reciente al más antiguo."""
-    entries = load_index()
+    """Respaldos existentes, del más reciente al más antiguo.
+
+    ``created_at`` tiene precisión de segundos; si dos respaldos coinciden,
+    manda el orden del índice, donde el último añadido es el más nuevo.
+    """
+    entries = list(enumerate(load_index()))
     if repo_path is not None:
         target = str(Path(repo_path).resolve())
-        entries = [b for b in entries if str(Path(b.repo_path).resolve()) == target]
-    return sorted(entries, key=lambda b: b.created_at, reverse=True)
+        entries = [(i, b) for i, b in entries if str(Path(b.repo_path).resolve()) == target]
+    entries.sort(key=lambda par: (par[1].created_at, par[0]), reverse=True)
+    return [b for _, b in entries]
 
 
 def last_backup(repo_path: "str | Path") -> Backup | None:
@@ -173,9 +221,15 @@ def get_backup(backup_id: str) -> Backup | None:
 # --------------------------------------------------------------------------
 
 def _new_id(team: str, when: datetime | None = None) -> str:
+    """Identificador único del respaldo, que también nombra sus referencias.
+
+    La fecha va con segundos para que se lea bien; el sufijo aleatorio evita
+    que dos respaldos del mismo segundo (p. ej. varios repos en «Subir todo»)
+    compartan id en el índice o se pisen las referencias.
+    """
     when = when or datetime.now()
     limpio = "".join(c if c.isalnum() or c in "-_" else "-" for c in team) or "EQUIPO"
-    return f"{when.strftime('%Y-%m-%d_%H%M%S')}_{limpio}"
+    return f"{when.strftime('%Y-%m-%d_%H%M%S')}_{limpio}_{secrets.token_hex(3)}"
 
 
 def _untracked_files(repo: Path) -> list[str]:
@@ -282,11 +336,7 @@ def create_backup(
 
     cambiados = git_ops.run(["status", "--porcelain=v2", "-z", "--untracked-files=all"], cwd=repo)
     if cambiados.ok:
-        backup.files_saved = [
-            entry.split(" ")[-1] if entry[0] != "?" else entry[2:]
-            for entry in cambiados.stdout.split("\0")
-            if entry and entry[0] in "12?u"
-        ]
+        backup.files_saved = [c.path for c in analyzer.parse_porcelain_v2(cambiados.stdout)]
 
     _add_to_index(backup)
     log.info(
@@ -339,17 +389,44 @@ def restore_backup(backup: "Backup | str", *, make_safety_copy: bool = True) -> 
             raise BackupError(f"No existe el respaldo «{backup}»")
         backup = encontrado
 
+    with repo_lock(backup.repo_path):
+        return _restore_backup(backup, make_safety_copy)
+
+
+def _restore_backup(backup: Backup, make_safety_copy: bool) -> Backup:
     repo = Path(backup.repo_path)
     if not git_ops.is_repo(repo):
         raise BackupError(f"La carpeta del respaldo ya no es un repositorio: {repo}")
 
     previo = (
-        create_backup(repo, f"antes de restaurar el respaldo del {backup.created.astimezone():%d/%m/%Y %H:%M}", backup.team)
+        create_backup(repo, f"{RESTORE_REASON_PREFIX} el respaldo del {backup.created.astimezone():%d/%m/%Y %H:%M}", backup.team)
         if make_safety_copy
         else backup
     )
 
     permiso = {ALLOW_BACKUP_RESTORE}
+
+    # 0) Volver a la rama donde se hizo el respaldo. Sin esto, el reset de
+    #    abajo movería la rama en la que esté ahora el usuario, que puede ser
+    #    otra. Solo se cambia HEAD: la carpeta la pone el reset, y lo que
+    #    hubiera en ella ya está en el respaldo previo.
+    if backup.head_sha:
+        actual = git_ops.current_branch(repo)
+        if backup.branch and actual != backup.branch:
+            cambio = git_ops.run(
+                ["symbolic-ref", "HEAD", f"refs/heads/{backup.branch}"], cwd=repo, allow=permiso
+            )
+        elif not backup.branch and actual is not None:
+            cambio = git_ops.run(
+                ["update-ref", "--no-deref", "HEAD", backup.head_sha], cwd=repo, allow=permiso
+            )
+        else:
+            cambio = None
+        if cambio is not None and not cambio.ok:
+            raise BackupError(
+                f"No se pudo volver a la rama del respaldo en «{backup.repo_name}»: "
+                f"{cambio.stderr.strip()}"
+            )
 
     # 1) Volver al commit guardado: recupera HEAD, el índice y los archivos seguidos.
     if backup.head_sha:
@@ -393,11 +470,19 @@ def undo_last(repo_path: "str | Path") -> Backup | None:
     Busca el respaldo más reciente que no sea una copia de seguridad creada
     por otra restauración, y vuelve a él.
     """
-    candidatos = [b for b in list_backups(repo_path) if not b.reason.startswith("antes de restaurar")]
-    if not candidatos:
+    candidato = undo_candidate(repo_path)
+    if candidato is None:
         log.info("no hay ningún respaldo que deshacer en %s", repo_path)
         return None
-    return restore_backup(candidatos[0])
+    return restore_backup(candidato)
+
+
+def undo_candidate(repo_path: "str | Path") -> Backup | None:
+    """El respaldo al que volvería :func:`undo_last`, sin tocar nada."""
+    return next(
+        (b for b in list_backups(repo_path) if not b.reason.startswith(RESTORE_REASON_PREFIX)),
+        None,
+    )
 
 
 # --------------------------------------------------------------------------

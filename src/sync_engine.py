@@ -14,6 +14,7 @@ las acciones individuales de la sección 6.6, al final del módulo.
 from __future__ import annotations
 
 import fnmatch
+import functools
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -309,6 +310,24 @@ class RunReport:
         )
 
 
+def _exclusivo(action: str):
+    """Ejecuta la operación con el repositorio reservado (``safety.repo_lock``).
+
+    Si otra ventana ya está trabajando en él, se omite con un mensaje claro
+    en lugar de pisarse.
+    """
+    def decorador(funcion):
+        @functools.wraps(funcion)
+        def envoltura(status: RepoStatus, *args, **kwargs) -> RepoResult:
+            try:
+                with safety.repo_lock(status.path):
+                    return funcion(status, *args, **kwargs)
+            except safety.RepoBusy as exc:
+                return RepoResult(status.name, action, ok=False, skipped=True, message=str(exc))
+        return envoltura
+    return decorador
+
+
 def ensure_git_identity(name: str | None = None, email: str | None = None) -> tuple[str, str] | None:
     """Comprueba (y si hace falta configura) el nombre y correo de Git (7.1).
 
@@ -332,6 +351,7 @@ def _with_trailer(message: str, team: str) -> str:
     return f"{message.rstrip()}\n\n{analyzer.TEAM_TRAILER}: {team}"
 
 
+@_exclusivo(PUSH)
 def push_repo(
     status: RepoStatus,
     team: str,
@@ -351,7 +371,7 @@ def push_repo(
         )
     try:
         # 2) Respaldo antes de tocar nada.
-        respaldo = safety.create_backup(repo, "antes de subir", team)
+        respaldo = safety.create_backup(repo, safety.PUSH_REASON, team)
 
         # 3-4) Guardar los cambios sin subir en un commit.
         if status.files:
@@ -421,6 +441,7 @@ def push_repo(
         )
 
 
+@_exclusivo(SYNC)
 def sync_repo(status: RepoStatus, team: str, *, token: str | None = None) -> RepoResult:
     """Baja los cambios de GitHub siguiendo la sección 8."""
     repo = status.path
@@ -546,6 +567,7 @@ def execute(
 # Acciones individuales para repositorios bloqueados (sección 6.6)
 # --------------------------------------------------------------------------
 
+@_exclusivo("merge")
 def try_merge(status: RepoStatus, team: str, *, token: str | None = None) -> RepoResult:
     """6.6(a) — «Intentar combinar automáticamente» un repositorio divergido.
 
@@ -553,13 +575,13 @@ def try_merge(status: RepoStatus, team: str, *, token: str | None = None) -> Rep
     queda exactamente como estaba.
     """
     repo = status.path
-    respaldo = safety.create_backup(repo, "antes de combinar", team)
-
     if status.files:
         return RepoResult(
-            status.name, "merge", ok=False, skipped=True, backup_id=respaldo.id,
+            status.name, "merge", ok=False, skipped=True,
             message="Antes de combinar hay que guardar o subir los cambios sin guardar",
         )
+
+    respaldo = safety.create_backup(repo, "antes de combinar", team)
 
     combinado = git_ops.run(
         ["pull", "--rebase", "origin"], cwd=repo, token=token, allow={ALLOW_REBASE_PULL}
@@ -582,6 +604,7 @@ def try_merge(status: RepoStatus, team: str, *, token: str | None = None) -> Rep
     )
 
 
+@_exclusivo("stash_sync")
 def stash_and_sync(status: RepoStatus, team: str, *, token: str | None = None) -> RepoResult:
     """6.6(b) — «Guardar mis cambios aparte y sincronizar».
 
@@ -591,23 +614,29 @@ def stash_and_sync(status: RepoStatus, team: str, *, token: str | None = None) -
     repo = status.path
     respaldo = safety.create_backup(repo, "antes de guardar los cambios aparte", team)
 
+    antes = _stash_top(repo)
     guardado = git_ops.run(["stash", "push", "-u", "-m", "Vaiven: antes de sincronizar"], cwd=repo)
     if not guardado.ok:
         return RepoResult(
             status.name, "stash_sync", ok=False, backup_id=respaldo.id,
             message=_readable_error(guardado.stderr),
         )
+    # Sin cambios, «stash push» termina bien pero no guarda nada; entonces un
+    # «stash pop» sacaría un escondite antiguo del usuario. Solo se recupera
+    # lo que se ha guardado aquí.
+    guardo_algo = _stash_top(repo) not in (None, antes)
 
     bajado = git_ops.run(["pull", "--ff-only", "origin"], cwd=repo, token=token)
     if not bajado.ok:
-        git_ops.run(["stash", "pop"], cwd=repo)
+        if guardo_algo:
+            git_ops.run(["stash", "pop"], cwd=repo)
         return RepoResult(
             status.name, "stash_sync", ok=False, backup_id=respaldo.id,
             message="No se pudo traer los cambios de GitHub; tus cambios se han devuelto tal cual",
         )
 
-    recuperado = git_ops.run(["stash", "pop"], cwd=repo)
-    if not recuperado.ok:
+    recuperado = git_ops.run(["stash", "pop"], cwd=repo) if guardo_algo else None
+    if recuperado is not None and not recuperado.ok:
         return RepoResult(
             status.name, "stash_sync", ok=False, backup_id=respaldo.id,
             new_state=analyzer.analyze_repo(repo, fetch=False).state,
@@ -624,6 +653,12 @@ def stash_and_sync(status: RepoStatus, team: str, *, token: str | None = None) -
     )
 
 
+def _stash_top(repo: Path) -> str | None:
+    """Commit del escondite más reciente, o ``None`` si está vacío."""
+    cima = git_ops.run(["rev-parse", "-q", "--verify", "refs/stash"], cwd=repo)
+    return cima.out if cima.ok and cima.out else None
+
+
 def push_this_repo(
     status: RepoStatus, team: str, message: str | None = None, *,
     token: str | None = None, allow_set_upstream: bool = False,
@@ -635,8 +670,10 @@ def push_this_repo(
     )
 
 
+@_exclusivo("undo")
 def undo(status: RepoStatus) -> RepoResult:
     """Deshace la última operación de Vaivén en un repositorio (6.4)."""
+    candidato = safety.undo_candidate(status.path)
     try:
         previo = safety.undo_last(status.path)
     except GitError as exc:
@@ -646,9 +683,19 @@ def undo(status: RepoStatus) -> RepoResult:
             status.name, "undo", ok=False, skipped=True,
             message="No hay ninguna operación reciente que deshacer",
         )
+    mensaje = "El proyecto ha vuelto a como estaba antes de la última operación"
+    if candidato is not None and candidato.reason == safety.PUSH_REASON:
+        # Deshacer es local: lo que ya llegó a GitHub sigue allí (nunca se
+        # fuerza un push), y ahora aparecerá como cambios por traer.
+        final = analyzer.analyze_repo(status.path, fetch=False)
+        if final.behind:
+            mensaje += (
+                ". Lo que ya se había subido sigue en GitHub; aquí aparecerá "
+                "como cambios por traer"
+            )
     return RepoResult(
         status.name, "undo", ok=True, backup_id=previo.id,
-        message="El proyecto ha vuelto a como estaba antes de la última operación",
+        message=mensaje,
     )
 
 

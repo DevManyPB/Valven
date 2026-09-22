@@ -6,7 +6,7 @@
 
 **Mantén tus proyectos de GitHub iguales en dos ordenadores, con dos botones.**
 
-[![Pruebas](https://img.shields.io/badge/pruebas-259%20pasando-brightgreen)](tests/)
+[![Pruebas](https://img.shields.io/badge/pruebas-313%20pasando-brightgreen)](tests/)
 [![Licencia](https://img.shields.io/badge/licencia-MIT-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
 [![Plataforma](https://img.shields.io/badge/plataforma-Windows-lightgrey)](#crear-el-programa)
@@ -45,7 +45,7 @@ evite usarlos, es que `git_ops.py` los rechaza lanzando una excepción.
 
 | | |
 |---|---|
-| **Nunca fuerza nada** | `push --force`, `reset --hard`, `clean -f` y compañía están prohibidos en el código. Hay 44 pruebas que lo verifican. |
+| **Nunca fuerza nada** | `push --force`, `reset --hard`, `clean -f` y compañía están prohibidos en el código, y solo se admite una lista cerrada de comandos. Hay 71 pruebas que lo verifican. |
 | **Respalda antes de actuar** | Cada operación deja un punto de retorno, incluidos los archivos que aún no están en Git. |
 | **No toca lo dudoso** | Si tienes trabajo más nuevo que GitHub, «Sincronizar todo» salta ese proyecto y te dice que lo subas primero. |
 | **Solo avanza en falso** | Lo único que sincroniza solo es `git pull --ff-only`, que por diseño no puede sobrescribir nada. |
@@ -54,7 +54,7 @@ evite usarlos, es que `git_ops.py` los rechaza lanzando una excepción.
 ## Lo que necesitas
 
 1. **Windows** (10 u 11).
-2. **Git**. Si no lo tienes, descárgalo de <https://git-scm.com> e instálalo
+2. **Git** 2.31 o posterior. Si no lo tienes, descárgalo de <https://git-scm.com> e instálalo
    con las opciones por defecto. Vaivén avisa si falta.
 3. Una **cuenta de GitHub**.
 
@@ -190,7 +190,7 @@ git clone https://github.com/DevManyPB/Valven.git
 cd Valven
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt     # Windows: .venv\Scripts\pip
-.venv/bin/python -m pytest                    # 259 pruebas, ~13 s
+.venv/bin/python -m pytest                    # 313 pruebas, ~13 s
 .venv/bin/python src/main.py                  # ejecutar sin empaquetar
 ```
 

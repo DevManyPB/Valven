@@ -108,6 +108,8 @@ Para que el usuario inicie sesión **una sola vez**, las operaciones de red de G
 git -c http.https://github.com/.extraheader="AUTHORIZATION: basic <base64('x-access-token:' + token)>" <comando>
 ```
 
+> Implementación: la misma configuración se pasa por las variables de entorno `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` (Git 2.31+), para que el token no aparezca en la línea de comandos. Ver D38 en DECISIONES.md.
+
 Si la sesión caduca o GitHub responde 401, la app vuelve a la pantalla de login con un mensaje amable.
 
 ## 6. Sistema de seguridad (núcleo del proyecto)

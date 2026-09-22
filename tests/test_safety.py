@@ -276,3 +276,62 @@ def test_el_estado_del_repo_no_cambia_tras_respaldar(sandbox):
     antes = analyze_repo(repo, fetch=False).state
     create_backup(repo, "antes de subir", TEAM_B)
     assert analyze_repo(repo, fetch=False).state is antes
+
+
+# --- regresiones de la revisión --------------------------------------------
+
+def test_restaurar_vuelve_a_la_rama_del_respaldo_sin_mover_la_actual(sandbox):
+    """Restaurar desde otra rama no debe arrastrar esa rama al commit guardado."""
+    repo = sandbox.b
+    respaldo = create_backup(repo, "antes de subir", TEAM_B)
+    git(repo, "checkout", "-b", "experimento")
+    punta = commit(repo, "exp.txt", "experimento\n", "Trabajo en otra rama", TEAM_B)
+
+    restore_backup(respaldo)
+
+    assert git(repo, "symbolic-ref", "--short", "HEAD") == "main"
+    assert git(repo, "rev-parse", "HEAD") == respaldo.head_sha
+    assert git(repo, "rev-parse", "experimento") == punta
+
+
+def test_restaurar_un_respaldo_con_head_suelto(sandbox):
+    repo = sandbox.b
+    commit(repo, "dos.txt", "dos\n", "Segundo", TEAM_B)
+    primero = git(repo, "rev-parse", "HEAD~1")
+    git(repo, "checkout", "--detach", primero)
+    respaldo = create_backup(repo, "antes de subir", TEAM_B)
+    git(repo, "checkout", "main")
+    punta_main = git(repo, "rev-parse", "main")
+
+    restore_backup(respaldo)
+
+    assert git(repo, "symbolic-ref", "-q", "HEAD", check=False) == ""
+    assert git(repo, "rev-parse", "HEAD") == primero
+    assert git(repo, "rev-parse", "main") == punta_main
+
+
+def test_dos_respaldos_del_mismo_segundo_no_se_pisan(sandbox):
+    from datetime import datetime
+    repo = sandbox.b
+    instante = datetime(2026, 9, 22, 12, 0, 0)
+    uno = create_backup(repo, "uno", TEAM_B, when=instante)
+    write(repo, "README.md", "cambiado\n")
+    dos = create_backup(repo, "dos", TEAM_B, when=instante)
+
+    assert uno.id != dos.id
+    assert uno.head_ref != dos.head_ref
+    refs = safety.backup_refs(repo)
+    assert uno.head_ref in refs and dos.head_ref in refs
+    # a igualdad de fecha, el último creado es el más reciente
+    assert list_backups(repo)[0].id == dos.id
+
+
+def test_la_lista_de_archivos_guardados_respeta_espacios_y_renombrados(sandbox):
+    repo = sandbox.b
+    commit(repo, "viejo nombre.txt", "x\n", "Archivo con espacios", TEAM_B)
+    git(repo, "mv", "viejo nombre.txt", "nuevo nombre.txt")
+    write(repo, "otra carpeta/mi archivo.txt", "y\n")
+
+    respaldo = create_backup(repo, "antes de subir", TEAM_B)
+
+    assert sorted(respaldo.files_saved) == ["nuevo nombre.txt", "otra carpeta/mi archivo.txt"]
