@@ -1,0 +1,11 @@
+# Vaivén — dependencias de ejecución
+customtkinter==5.2.2
+requests==2.32.3
+keyring==25.6.0
+Pillow==11.0.0
+
+# Empaquetado (solo Windows)
+pyinstaller==6.11.1
+
+# Desarrollo y pruebas
+pytest==8.3.4

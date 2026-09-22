@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Empaquetado
+build/
+dist/
+*.spec
+
+# Pruebas
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Credenciales: nunca deben entrar en el repositorio.
+# El Client Secret vive en %APPDATA%\Vaiven\oauth.json, fuera de aquí.
+oauth.json
+*.secret
+.env
+
+# Editores
+.vscode/
+.idea/
+*.swp
