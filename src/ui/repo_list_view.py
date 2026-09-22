@@ -131,7 +131,7 @@ class RepoListView(ctk.CTkFrame):
         cabecera.grid_columnconfigure(1, weight=1)
 
         self.selector = ctk.CTkSegmentedButton(
-            cabecera, values=list(FILTERS), command=self._cambiar_filtro,
+            cabecera, **theme.SEGMENTADO, values=list(FILTERS), command=self._cambiar_filtro,
         )
         self.selector.set(FILTER_ALL)
         self.selector.grid(row=0, column=0, sticky="w")

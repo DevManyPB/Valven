@@ -81,7 +81,7 @@ class SettingsView(ctk.CTkToplevel):
         # --- tema ---
         fila = self._titulo(cuerpo, fila, "Aspecto")
         self.selector_tema = ctk.CTkSegmentedButton(
-            cuerpo, values=["Automático", "Claro", "Oscuro"], command=self._cambiar_tema,
+            cuerpo, **theme.SEGMENTADO, values=["Automático", "Claro", "Oscuro"], command=self._cambiar_tema,
         )
         self.selector_tema.set(
             {"system": "Automático", "light": "Claro", "dark": "Oscuro"}[config.theme]
@@ -107,19 +107,18 @@ class SettingsView(ctk.CTkToplevel):
         acciones.grid(row=fila, column=0, sticky="w", pady=(0, 10))
         ctk.CTkButton(
             acciones, text="Abrir la carpeta de registros", width=210,
-            fg_color="transparent", border_width=1, command=self._abrir_logs,
+            **theme.secundario(), command=self._abrir_logs,
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
-            acciones, text="Cerrar sesión", width=130, fg_color="transparent",
-            border_width=1, text_color=theme.DANGER, command=self._cerrar_sesion,
+            acciones, text="Cerrar sesión", width=130,
+            **theme.secundario(text_color=theme.DANGER), command=self._cerrar_sesion,
         ).pack(side="left")
 
         # --- pie ---
         pie = ctk.CTkFrame(self, fg_color="transparent")
         pie.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
         ctk.CTkButton(
-            pie, text="Cancelar", width=110, fg_color="transparent",
-            border_width=1, command=self.destroy,
+            pie, text="Cancelar", width=110, **theme.secundario(), command=self.destroy,
         ).pack(side="right", padx=(8, 0))
         ctk.CTkButton(
             pie, text="Guardar", width=130,

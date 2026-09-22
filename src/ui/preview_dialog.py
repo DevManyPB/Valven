@@ -11,7 +11,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from ..sync_engine import PUSH, Plan, PlannedAction
-from . import texto_seguro, theme
+from . import NOMBRES_CAMBIO, texto_seguro, theme
 
 
 class PreviewDialog(ctk.CTkToplevel):
@@ -177,8 +177,10 @@ class PreviewDialog(ctk.CTkToplevel):
     def _detalle(self, accion: PlannedAction, es_subida: bool) -> list[str]:
         status = accion.status
         if es_subida:
-            lineas = [f"{c.change[:4]:>4}  {c.path}" for c in status.files[:20]]
-            lineas += [f"      {c.short_sha}  {c.subject}" for c in status.outgoing[:10]]
+            lineas = [
+                f"{NOMBRES_CAMBIO.get(c.change, c.change):>12}   {c.path}" for c in status.files[:20]
+            ]
+            lineas += [f"{c.short_sha:>12}   {c.subject}" for c in status.outgoing[:10]]
         else:
             lineas = [
                 f"{c.short_sha}  {c.subject}" + (f"  ({c.team})" if c.team else "")
@@ -272,8 +274,7 @@ class PreviewDialog(ctk.CTkToplevel):
         botones = ctk.CTkFrame(pie, fg_color="transparent")
         botones.grid(row=1, column=1, sticky="e")
         ctk.CTkButton(
-            botones, text="Cancelar", width=110, fg_color="transparent",
-            border_width=1, command=self._cancelar,
+            botones, text="Cancelar", width=110, **theme.secundario(), command=self._cancelar,
         ).pack(side="left", padx=(0, 8))
         self.boton_confirmar = ctk.CTkButton(
             botones, text="Sí, continuar", width=150,
@@ -308,7 +309,15 @@ class PreviewDialog(ctk.CTkToplevel):
             self._riesgo_aceptado.set(False)
 
         bloqueado = self.plan.is_empty or (hay_secretos and not self._riesgo_aceptado.get())
-        self.boton_confirmar.configure(state="disabled" if bloqueado else "normal")
+        if bloqueado:
+            # CTk deja el relleno azul al desactivar: parecía que se podía pulsar.
+            self.boton_confirmar.configure(
+                state="disabled", fg_color=theme.DISABLED_BG, text_color_disabled=theme.DISABLED_TEXT,
+            )
+        else:
+            self.boton_confirmar.configure(
+                state="normal", fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"],
+            )
 
     def _confirmar(self) -> None:
         self._sincronizar_seleccion()

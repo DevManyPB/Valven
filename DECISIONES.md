@@ -611,3 +611,33 @@ caracteres que GitHub admite (así no puede salirse de la carpeta raíz con
 va el token. Además, la dirección va detrás de `--` para que Git nunca
 pueda leerla como una opción. Los datos vienen de la API de GitHub por
 HTTPS, así que es una defensa en profundidad, no un fallo explotable.
+
+### D46. Revisión de la interfaz con capturas reales
+
+La interfaz se revisó con capturas de cada pantalla, en los dos temas, con
+ocho proyectos de ejemplo (uno por estado). Salieron fallos que el código no
+dejaba ver:
+
+* **Texto invisible en el tema claro.** Los botones con borde («Ajustes»,
+  «Revisar estado», «Cancelar», «Respaldos»…) tenían texto blanco sobre
+  fondo claro. Como el tema por defecto es «Automático», era lo que veía
+  casi todo el mundo en Windows. Ahora usan `theme.secundario()`, y los
+  selectores de pestañas `theme.SEGMENTADO`.
+* **Botones tapados en el detalle.** «Respaldos» y «Deshacer» compartían
+  celda con las acciones y tapaban «Ver diferencias», «Abrir en VS Code» y
+  «Abrir carpeta». Ahora hay dos filas (lo que resuelve el estado, y las
+  herramientas) y «Respaldos»/«Deshacer» van al pie.
+* **El detalle no se bloqueaba ni se actualizaba.** El bloqueo solo miraba
+  los hijos directos de la ventana, que son marcos, así que ningún botón se
+  desactivaba. Y al terminar una operación la ventana seguía enseñando el
+  estado de antes, con los botones de antes. Ahora bloquea cada botón,
+  vuelve a analizar el proyecto y lo redibuja todo.
+* «Deshacer» solo se activa si hay algo que deshacer.
+* La vista previa decía `untr`/`modi`; ahora usa los mismos nombres que el
+  detalle (`NOMBRES_CAMBIO`). «Sí, continuar» se ve gris cuando está
+  bloqueado; antes parecía pulsable.
+
+Además: foto de perfil real (sin enviar la sesión: es una imagen pública),
+`@usuario` junto al equipo, barra de progreso con cifras en vez de girar sin
+fin, icono en la pantalla de inicio de sesión, rutas largas acortadas por la
+izquierda y atajos de teclado.

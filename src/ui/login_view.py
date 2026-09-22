@@ -14,7 +14,7 @@ import threading
 
 import customtkinter as ctk
 
-from .. import auth
+from .. import auth, config as config_module
 from ..logger import get_logger
 from . import call_on_ui_thread, theme
 
@@ -35,8 +35,10 @@ class LoginView(ctk.CTkFrame):
         self.grid_rowconfigure(0, weight=1)
         self.grid_rowconfigure(9, weight=1)
 
+        logo = self._logo()
         ctk.CTkLabel(
-            self, text="Vaivén", font=ctk.CTkFont(size=40, weight="bold")
+            self, text="Vaivén", font=ctk.CTkFont(size=40, weight="bold"),
+            image=logo, compound="top",
         ).grid(row=1, column=0, pady=(0, 4))
         ctk.CTkLabel(
             self,
@@ -67,17 +69,29 @@ class LoginView(ctk.CTkFrame):
         self.acciones.grid(row=7, column=0, pady=(12, 0))
         self.boton_navegador = ctk.CTkButton(
             self.acciones, text="Abrir el navegador otra vez", width=200,
-            fg_color="transparent", border_width=1, command=self._abrir_navegador,
+            **theme.secundario(), command=self._abrir_navegador,
         )
         self.boton_copiar = ctk.CTkButton(
             self.acciones, text="Copiar el código", width=150,
-            fg_color="transparent", border_width=1, command=self._copiar,
+            **theme.secundario(), command=self._copiar,
         )
 
         self.error = ctk.CTkLabel(
             self, text="", font=ctk.CTkFont(size=13), text_color=theme.DANGER, wraplength=460,
         )
         self.error.grid(row=8, column=0, pady=(14, 0))
+
+    def _logo(self):
+        """El icono de la app sobre el nombre, si está disponible."""
+        ruta = config_module.resource_path("assets", "icon.png")
+        try:
+            from PIL import Image
+
+            imagen = Image.open(ruta)
+            self._imagen_logo = ctk.CTkImage(light_image=imagen, dark_image=imagen, size=(88, 88))
+            return self._imagen_logo
+        except Exception:
+            return None
 
     # --- flujo ----------------------------------------------------------
 

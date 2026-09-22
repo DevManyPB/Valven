@@ -14,10 +14,10 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from .. import safety, sync_engine
+from .. import analyzer, safety, sync_engine
 from ..analyzer import RepoState, RepoStatus
 from ..logger import get_logger
-from . import call_on_ui_thread, texto_seguro, theme
+from . import NOMBRES_CAMBIO, call_on_ui_thread, etiqueta_segura, ruta_corta, texto_seguro, theme
 
 log = get_logger("ui.detail")
 
@@ -57,19 +57,25 @@ class RepoDetailView(ctk.CTkToplevel):
         self.team = team
         self.token = token
         self.on_changed = on_changed
+        self._ocupado = False
+        self._botones_activos: list[ctk.CTkButton] = []
 
         self.title(status.name)
         self.geometry("700x600")
-        self.minsize(520, 440)
+        self.minsize(560, 460)
         self.transient(master)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
 
-        self._cabecera()
-        self._botones()
+        self.zona_cabecera = ctk.CTkFrame(self, fg_color="transparent")
+        self.zona_cabecera.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 6))
+        self.zona_botones = ctk.CTkFrame(self, fg_color="transparent")
+        self.zona_botones.grid(row=1, column=0, sticky="ew", padx=20, pady=(8, 4))
         self._contenido()
         self._barra_estado()
+        self._pintar()
 
+        self.bind("<Escape>", lambda _e: self.destroy())
         self.after(120, self._enfocar)
 
     def _enfocar(self) -> None:
@@ -78,11 +84,19 @@ class RepoDetailView(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def _pintar(self) -> None:
+        """Dibuja todo lo que depende del estado del proyecto."""
+        self._cabecera()
+        self._botones()
+        self._pintar_contenido()
+        self._pintar_pie()
+
     # --- partes -----------------------------------------------------------
 
     def _cabecera(self) -> None:
-        marco = ctk.CTkFrame(self, fg_color="transparent")
-        marco.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 6))
+        marco = self.zona_cabecera
+        for hijo in marco.winfo_children():
+            hijo.destroy()
         marco.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
@@ -103,58 +117,54 @@ class RepoDetailView(ctk.CTkToplevel):
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         ctk.CTkLabel(
-            marco, text=str(self.status.path), anchor="w",
+            marco, text=ruta_corta(self.status.path), anchor="w",
             font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
+    def _boton(self, padre, texto, orden, *, destacado=False, **kwargs) -> ctk.CTkButton:
+        estilo = {} if destacado else theme.secundario()
+        estilo.update(kwargs)
+        widget = ctk.CTkButton(padre, text=texto, height=34, command=orden, **estilo)
+        widget.pack(side="left", padx=(0, 6), pady=2)
+        self._botones_activos.append(widget)
+        return widget
+
     def _botones(self) -> None:
-        marco = ctk.CTkFrame(self, fg_color="transparent")
-        marco.grid(row=1, column=0, sticky="ew", padx=20, pady=(10, 8))
+        """Dos filas: lo que resuelve el estado actual, y las herramientas.
 
-        def boton(texto, orden, destacado=False, **kwargs):
-            widget = ctk.CTkButton(
-                marco, text=texto, height=34, command=orden,
-                fg_color=None if destacado else "transparent",
-                border_width=0 if destacado else 1,
-                **kwargs,
-            )
-            widget.pack(side="left", padx=(0, 6), pady=2)
-            return widget
+        Antes iban en una sola fila junto a «Respaldos» y «Deshacer», y con
+        más de tres acciones se tapaban unos botones a otros.
+        """
+        for hijo in self.zona_botones.winfo_children():
+            hijo.destroy()
+        self._botones_activos = []
 
+        principales = ctk.CTkFrame(self.zona_botones, fg_color="transparent")
         estado = self.status.state
         if self.status.can_push:
-            boton("⬆ Subir este proyecto", self._subir, destacado=True)
+            self._boton(principales, "⬆ Subir este proyecto", self._subir, destacado=True)
         if self.status.can_sync:
-            boton("⬇ Sincronizar", self._sincronizar, destacado=True)
+            self._boton(principales, "⬇ Sincronizar", self._sincronizar, destacado=True)
         if estado is RepoState.DIVERGED:
-            boton("Intentar combinar", self._combinar, destacado=True)
+            self._boton(principales, "Intentar combinar", self._combinar, destacado=True)
         if estado is RepoState.BEHIND_WITH_LOCAL_CHANGES:
-            boton("⬆ Subir mis cambios primero", self._subir, destacado=True)
-            boton("Guardar aparte y sincronizar", self._guardar_aparte)
+            self._boton(principales, "⬆ Subir mis cambios primero", self._subir, destacado=True)
+            self._boton(principales, "Guardar aparte y sincronizar", self._guardar_aparte)
         if estado is RepoState.NO_UPSTREAM:
-            boton("⬆ Publicar esta rama en GitHub", self._publicar_rama, destacado=True)
+            self._boton(principales, "⬆ Publicar esta rama en GitHub", self._publicar_rama, destacado=True)
+        if principales.winfo_children():
+            principales.pack(fill="x", pady=(0, 4))
 
-        boton("Ver diferencias", self._ver_diferencias)
-        boton("Abrir en VS Code", lambda: open_in_vscode(self.status.path))
-        boton("Abrir carpeta", lambda: open_folder(self.status.path))
-
-        segunda = ctk.CTkFrame(self, fg_color="transparent")
-        segunda.grid(row=1, column=0, sticky="e", padx=20)
-        ctk.CTkButton(
-            segunda, text="Deshacer última operación", height=34, width=200,
-            fg_color="transparent", border_width=1, text_color=theme.DANGER,
-            command=self._deshacer,
-        ).pack(side="right", padx=(6, 0), pady=2)
-        ctk.CTkButton(
-            segunda, text="Respaldos", height=34, width=110,
-            fg_color="transparent", border_width=1, command=self._respaldos,
-        ).pack(side="right", pady=2)
+        herramientas = ctk.CTkFrame(self.zona_botones, fg_color="transparent")
+        herramientas.pack(fill="x")
+        self._boton(herramientas, "Ver diferencias", self._ver_diferencias)
+        self._boton(herramientas, "Abrir en VS Code", lambda: open_in_vscode(self.status.path))
+        self._boton(herramientas, "Abrir carpeta", lambda: open_folder(self.status.path))
 
     def _contenido(self) -> None:
         self.contenido = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.contenido.grid(row=2, column=0, sticky="nsew", padx=16, pady=(6, 6))
         self.contenido.grid_columnconfigure(0, weight=1)
-        self._pintar_contenido()
 
     def _pintar_contenido(self) -> None:
         for hijo in self.contenido.winfo_children():
@@ -204,10 +214,6 @@ class RepoDetailView(ctk.CTkToplevel):
         return fila
 
     def _bloque_archivos(self, fila: int) -> int:
-        nombres = {
-            "modified": "modificado", "added": "nuevo", "deleted": "borrado",
-            "renamed": "renombrado", "untracked": "nuevo", "conflict": "en conflicto",
-        }
         ctk.CTkLabel(
             self.contenido, text=f"Archivos con cambios ({len(self.status.files)})", anchor="w",
             font=ctk.CTkFont(size=14, weight="bold"),
@@ -215,28 +221,59 @@ class RepoDetailView(ctk.CTkToplevel):
         fila += 1
         caja = ctk.CTkTextbox(self.contenido, height=min(260, 20 * len(self.status.files) + 20))
         caja.insert("1.0", texto_seguro("\n".join(
-            f"{nombres.get(c.change, c.change):>12}   {c.path}" for c in self.status.files
+            f"{NOMBRES_CAMBIO.get(c.change, c.change):>12}   {c.path}" for c in self.status.files
         )))
         caja.configure(state="disabled", font=ctk.CTkFont(size=11, family="Consolas"))
         caja.grid(row=fila, column=0, sticky="ew", pady=2)
         return fila + 1
 
     def _barra_estado(self) -> None:
+        pie = ctk.CTkFrame(self, fg_color="transparent")
+        pie.grid(row=3, column=0, sticky="ew", padx=20, pady=(4, 16))
+        pie.grid_columnconfigure(0, weight=1)
         self.mensaje = ctk.CTkLabel(
-            self, text="", anchor="w", font=ctk.CTkFont(size=12), wraplength=640, justify="left",
+            pie, text="", anchor="w", font=ctk.CTkFont(size=12), wraplength=380, justify="left",
         )
-        self.mensaje.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 16))
+        self.mensaje.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self.boton_respaldos = ctk.CTkButton(
+            pie, text="Respaldos", height=32, width=100,
+            **theme.secundario(), command=self._respaldos,
+        )
+        self.boton_respaldos.grid(row=0, column=1, padx=(0, 6))
+        self.boton_deshacer = ctk.CTkButton(
+            pie, text="Deshacer última operación", height=32, width=190,
+            **theme.secundario(text_color=theme.DANGER), command=self._deshacer,
+        )
+        self.boton_deshacer.grid(row=0, column=2)
+
+    def _pintar_pie(self) -> None:
+        """«Deshacer» solo se ofrece si hay algo que deshacer."""
+        hay_algo = safety.undo_candidate(self.status.path) is not None
+        self.boton_deshacer.configure(state="normal" if hay_algo and not self._ocupado else "disabled")
 
     # --- acciones individuales (sección 6.6) ------------------------------
 
-    def _en_segundo_plano(self, trabajo, etiqueta: str) -> None:
-        """Ejecuta una operación sin congelar la ventana (sección 2)."""
-        self.mensaje.configure(text=f"{etiqueta}…", text_color=theme.TEXT_MUTED)
-        for hijo in self.winfo_children():
+    def _bloquear(self, ocupado: bool) -> None:
+        self._ocupado = ocupado
+        estado = "disabled" if ocupado else "normal"
+        for boton in (*self._botones_activos, self.boton_respaldos, self.boton_deshacer):
             try:
-                hijo.configure(state="disabled")
+                boton.configure(state=estado)
             except Exception:
                 pass
+        if not ocupado:
+            self._pintar_pie()
+
+    def _en_segundo_plano(self, trabajo, etiqueta: str) -> None:
+        """Ejecuta una operación sin congelar la ventana (sección 2).
+
+        Al terminar vuelve a analizar el proyecto y redibuja la ventana: los
+        botones que tocan dependen del estado nuevo, no del de antes.
+        """
+        if self._ocupado:
+            return
+        self.mensaje.configure(text=f"{etiqueta}…", text_color=theme.TEXT_MUTED)
+        self._bloquear(True)
 
         def hilo() -> None:
             try:
@@ -244,13 +281,21 @@ class RepoDetailView(ctk.CTkToplevel):
             except Exception as exc:  # pragma: no cover - red de seguridad
                 log.exception("fallo en la acción «%s»", etiqueta)
                 resultado = sync_engine.RepoResult(self.status.name, etiqueta, False, str(exc))
-            call_on_ui_thread(self, self._terminado, resultado)
+            try:
+                nuevo = analyzer.analyze_repo(self.status.path, fetch=False)
+            except Exception:  # pragma: no cover - red de seguridad
+                nuevo = None
+            call_on_ui_thread(self, self._terminado, resultado, nuevo)
 
         threading.Thread(target=hilo, daemon=True).start()
 
-    def _terminado(self, resultado: sync_engine.RepoResult) -> None:
+    def _terminado(self, resultado: sync_engine.RepoResult, nuevo: RepoStatus | None) -> None:
+        if nuevo is not None:
+            self.status = nuevo
+            self._pintar()
+        self._bloquear(False)
         self.mensaje.configure(
-            text=resultado.message,
+            text=etiqueta_segura(resultado.message, maximo=300),
             text_color=theme.SUCCESS if resultado.ok else theme.DANGER,
         )
         self.on_changed()

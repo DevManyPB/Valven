@@ -15,7 +15,7 @@ import customtkinter as ctk
 from .. import analyzer, auth, config as config_module, github_api, safety, startup, sync_engine
 from ..analyzer import RepoStatus
 from ..logger import get_logger
-from . import call_on_ui_thread, etiqueta_segura, theme
+from . import call_on_ui_thread, descargar_avatar, etiqueta_segura, theme
 from .login_view import LoginView
 from .preview_dialog import ask
 from .repo_detail_view import RepoDetailView
@@ -122,11 +122,25 @@ class VaivenApp(ctk.CTk):
         self._barra_inferior(marco)
 
         self._cargar_usuario()
+        self._atajos()
         if self.config_data.root_folder:
             if self.config_data.check_on_open:
                 self.after(300, self.revisar_estado)
         else:
             self.after(400, self._pedir_carpeta)
+
+    def _atajos(self) -> None:
+        """F5 o Ctrl+R revisan; Ctrl+, abre los ajustes."""
+        def si_libre(orden):
+            def manejador(_evento=None):
+                if self.login is None and not self._ocupado:
+                    orden()
+                return "break"
+            return manejador
+
+        for tecla in ("<F5>", "<Control-r>", "<Control-R>"):
+            self.bind(tecla, si_libre(self.revisar_estado))
+        self.bind("<Control-comma>", si_libre(self._abrir_ajustes))
 
     def _barra_superior(self, padre) -> None:
         barra = ctk.CTkFrame(padre, fg_color="transparent")
@@ -145,14 +159,14 @@ class VaivenApp(ctk.CTk):
         self.usuario_label.grid(row=0, column=1, sticky="w")
 
         self.equipo_label = ctk.CTkLabel(
-            barra, text=f"Este equipo: {self.config_data.team_name}", anchor="w",
+            barra, text=self._texto_equipo(), anchor="w",
             font=ctk.CTkFont(size=12), text_color=theme.TEXT_MUTED,
         )
         self.equipo_label.grid(row=1, column=1, sticky="w")
 
         ctk.CTkButton(
             barra, text="⚙  Ajustes", width=110, height=34,
-            fg_color="transparent", border_width=1, command=self._abrir_ajustes,
+            **theme.secundario(), command=self._abrir_ajustes,
         ).grid(row=0, column=2, rowspan=2, sticky="e")
 
     def _acciones(self, padre) -> None:
@@ -178,7 +192,7 @@ class VaivenApp(ctk.CTk):
 
         self.boton_revisar = ctk.CTkButton(
             marco, text="↻  Revisar estado", height=64, width=170,
-            fg_color="transparent", border_width=1, command=self.revisar_estado,
+            **theme.secundario(), command=self.revisar_estado,
         )
         self.boton_revisar.grid(row=0, column=2)
 
@@ -253,6 +267,16 @@ class VaivenApp(ctk.CTk):
         etiqueta = etiqueta_segura(nombre, maximo=60) if nombre else ""
         texto = f"({hechos}/{total}) {etiqueta}…" if etiqueta else f"({hechos}/{total}) terminando…"
         call_on_ui_thread(self, self._estado, texto)
+        call_on_ui_thread(self, self._llenar_progreso, hechos, total)
+
+    def _llenar_progreso(self, hechos: int, total: int) -> None:
+        """La barra deja de girar y dice cuánto falta en cuanto hay cifras."""
+        if not self._ocupado or not total:
+            return
+        if self.progreso.cget("mode") != "determinate":
+            self.progreso.stop()
+            self.progreso.configure(mode="determinate")
+        self.progreso.set(hechos / total)
 
     # --- usuario y carpeta -------------------------------------------------
 
@@ -273,14 +297,24 @@ class VaivenApp(ctk.CTk):
                 log.warning("no se pudo leer el usuario de GitHub: %s", exc)
                 call_on_ui_thread(self, lambda: self.usuario_label.configure(text="Sin conexión con GitHub"))
                 return
-            call_on_ui_thread(self, self._pintar_usuario, usuario)
+            call_on_ui_thread(self, self._pintar_usuario, usuario, descargar_avatar(usuario.avatar_url))
 
         threading.Thread(target=hilo, daemon=True).start()
 
-    def _pintar_usuario(self, usuario: github_api.GitHubUser) -> None:
+    def _pintar_usuario(self, usuario: github_api.GitHubUser, foto=None) -> None:
         self.user = usuario
         self.usuario_label.configure(text=usuario.display_name)
-        self.avatar.configure(text="●", text_color=theme.SUCCESS)
+        self.equipo_label.configure(text=self._texto_equipo())
+        if foto is not None:
+            # La referencia se guarda: si no, Tk borra la imagen al instante.
+            self._foto = ctk.CTkImage(light_image=foto, dark_image=foto, size=foto.size)
+            self.avatar.configure(image=self._foto, text="")
+        else:
+            self.avatar.configure(text="●", text_color=theme.SUCCESS)
+
+    def _texto_equipo(self) -> str:
+        cuenta = f"@{self.user.login} · " if self.user and self.user.login else ""
+        return f"{cuenta}Este equipo: {self.config_data.team_name}"
 
     def _sesion_caducada(self) -> None:
         """Sección 5.3: si GitHub rechaza la sesión, se vuelve al login."""
@@ -303,7 +337,7 @@ class VaivenApp(ctk.CTk):
 
     def _ajustes_guardados(self, datos: config_module.Config) -> None:
         self.config_data = datos
-        self.equipo_label.configure(text=f"Este equipo: {datos.team_name}")
+        self.equipo_label.configure(text=self._texto_equipo())
         self.revisar_estado()
 
     # --- análisis -----------------------------------------------------------
@@ -477,8 +511,7 @@ class IdentityDialog(ctk.CTkToplevel):
         botones = ctk.CTkFrame(self, fg_color="transparent")
         botones.grid(row=4, column=0, padx=24, pady=(0, 20), sticky="e")
         ctk.CTkButton(
-            botones, text="Cancelar", width=100, fg_color="transparent",
-            border_width=1, command=self.destroy,
+            botones, text="Cancelar", width=100, **theme.secundario(), command=self.destroy,
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(botones, text="Guardar", width=120, command=self._guardar).pack(side="left")
 
@@ -535,8 +568,7 @@ class ResultDialog(ctk.CTkToplevel):
         pie = ctk.CTkFrame(self, fg_color="transparent")
         pie.grid(row=2, column=0, sticky="ew", padx=20, pady=(8, 18))
         ctk.CTkButton(
-            pie, text="Ver el registro", width=140, fg_color="transparent",
-            border_width=1, command=self._abrir_log,
+            pie, text="Ver el registro", width=140, **theme.secundario(), command=self._abrir_log,
         ).pack(side="left")
         ctk.CTkButton(pie, text="Entendido", width=120, command=self.destroy).pack(side="right")
 

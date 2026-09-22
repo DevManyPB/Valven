@@ -254,6 +254,17 @@ aviso en silencio si la ventana ya se cerró.
 Hay una prueba que falla si alguna vista llama a `self.after(0, …)`
 directamente.
 
+### Colores que siguen al tema
+
+`theme.py` reúne los colores como pares `(claro, oscuro)`. Los botones con
+borde se crean siempre con `theme.secundario()` y los selectores con
+`theme.SEGMENTADO`: CustomTkinter pinta el texto de los botones en blanco en
+los dos temas, y sin relleno eso lo hacía invisible en el tema claro (D46).
+Hay una prueba que falla si reaparece un botón con borde sin ese estilo.
+
+Las capturas de pantalla para revisar la interfaz se pueden sacar sin
+escritorio con Xvfb y `PIL.ImageGrab.grab(xdisplay=":99")`.
+
 ### Todo texto se acota antes de dibujarlo
 
 Este proyecto se cayó dos veces por lo mismo, y merece la pena contarlo
@@ -291,7 +302,7 @@ inserta texto de Git sin pasarlo por ese filtro.
 
 ## Las pruebas
 
-328 pruebas, sin tocar GitHub ni ningún repositorio real.
+332 pruebas, sin tocar GitHub ni ningún repositorio real.
 
 ```
 tests/conftest.py            dos clones de un remoto bare local = dos equipos

@@ -68,3 +68,66 @@ def etiqueta_segura(texto, *, maximo: int = MAX_ETIQUETA) -> str:
     """
     linea = " ".join(str(texto).split())
     return linea if len(linea) <= maximo else f"{linea[:maximo]}…"
+
+
+#: Cómo se llama cada tipo de cambio en pantalla (sin jerga de Git).
+NOMBRES_CAMBIO = {
+    "modified": "modificado", "added": "nuevo", "deleted": "borrado",
+    "renamed": "renombrado", "untracked": "nuevo", "conflict": "en conflicto",
+}
+
+
+def ruta_corta(ruta, *, maximo: int = 70) -> str:
+    """Acorta una ruta por la izquierda, que es lo menos informativo.
+
+    ``C:\\Users\\jhon\\Documentos\\Proyectos\\web`` se queda en
+    ``…\\Proyectos\\web``: el final es lo que distingue un proyecto de otro.
+    """
+    texto = str(ruta)
+    if len(texto) <= maximo:
+        return texto
+    cola = texto[-(maximo - 1):]
+    for separador in ("/", "\\"):
+        corte = cola.find(separador)
+        if corte > 0:
+            cola = cola[corte:]
+            break
+    return f"…{cola}"
+
+
+def imagen_redonda(imagen, tamano: int):
+    """Recorta una imagen de Pillow en círculo, lista para un avatar.
+
+    Se escala al doble y se reduce al final para que el borde no salga
+    dentado: Tk no suaviza las imágenes.
+    """
+    from PIL import Image, ImageDraw
+
+    grande = tamano * 4
+    cuadrada = imagen.convert("RGBA").resize((grande, grande), Image.LANCZOS)
+    mascara = Image.new("L", (grande, grande), 0)
+    ImageDraw.Draw(mascara).ellipse((0, 0, grande - 1, grande - 1), fill=255)
+    cuadrada.putalpha(mascara)
+    return cuadrada.resize((tamano, tamano), Image.LANCZOS)
+
+
+def descargar_avatar(url: str | None, tamano: int = 40):
+    """Foto de perfil de GitHub, redonda, o ``None`` si no se puede.
+
+    Es una imagen pública: la petición no lleva la sesión del usuario.
+    """
+    if not url:
+        return None
+    try:
+        import io
+
+        import requests
+        from PIL import Image
+
+        separador = "&" if "?" in url else "?"
+        respuesta = requests.get(f"{url}{separador}s={tamano * 2}", timeout=10)
+        respuesta.raise_for_status()
+        return imagen_redonda(Image.open(io.BytesIO(respuesta.content)), tamano)
+    except Exception:
+        return None
+

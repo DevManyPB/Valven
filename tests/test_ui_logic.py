@@ -480,3 +480,41 @@ def test_la_barra_de_estado_solo_se_escribe_desde_un_sitio():
     ]
     assert len(escrituras) == 1, f"escrituras directas en las líneas {escrituras}"
     assert "def _estado(" in texto
+
+
+# --- utilidades de la interfaz ---------------------------------------------
+
+def test_la_ruta_corta_conserva_el_final():
+    from src.ui import ruta_corta
+    larga = "C:\\Users\\jhon\\Documentos\\Proyectos\\trabajo\\clientes\\2026\\tienda-online"
+    corta = ruta_corta(larga, maximo=40)
+    assert corta.startswith("…\\") and corta.endswith("tienda-online")
+    assert len(corta) <= 40
+    assert ruta_corta("/home/jhon/web", maximo=40) == "/home/jhon/web"
+
+
+def test_el_avatar_es_redondo_y_del_tamano_pedido():
+    from PIL import Image
+    from src.ui import imagen_redonda
+    avatar = imagen_redonda(Image.new("RGB", (100, 60), "red"), 40)
+    assert avatar.size == (40, 40)
+    assert avatar.getpixel((0, 0))[3] == 0          # esquina transparente
+    assert avatar.getpixel((20, 20))[3] == 255      # centro opaco
+
+
+def test_sin_direccion_no_hay_avatar():
+    from src.ui import descargar_avatar
+    assert descargar_avatar(None) is None
+    assert descargar_avatar("") is None
+
+
+def test_los_botones_con_borde_siguen_al_tema():
+    """En el tema claro, el texto blanco de CTk sobre fondo claro era invisible."""
+    from src.ui import theme
+    estilo = theme.secundario()
+    assert estilo["fg_color"] == "transparent"
+    assert estilo["text_color"] == theme.TEXT
+    assert theme.secundario(text_color=theme.DANGER)["text_color"] == theme.DANGER
+    for archivo in (RAIZ / "src" / "ui").glob("*.py"):
+        texto = archivo.read_text(encoding="utf-8")
+        assert 'fg_color="transparent", border_width' not in texto, archivo.name
