@@ -3,6 +3,9 @@
 Cada fila enseña lo justo para decidir de un vistazo: un punto de color con
 el estado, el nombre, la rama, una frase corta sin jerga y la fecha del
 último cambio. El detalle técnico vive en la vista de detalle.
+
+Debajo van los repositorios que están en GitHub y no en este equipo, cada
+uno con su botón «Traer» (sección 8).
 """
 
 from __future__ import annotations
@@ -12,16 +15,20 @@ from datetime import datetime, timezone
 import customtkinter as ctk
 
 from ..analyzer import RepoState, RepoStatus
+from ..github_api import GitHubRepo
 from . import theme
 
 #: Filtros de la sección 9.1.
 FILTER_ALL = "Todos"
 FILTER_ATTENTION = "Necesitan atención"
 FILTER_CHANGES = "Con cambios"
-FILTERS = (FILTER_ALL, FILTER_ATTENTION, FILTER_CHANGES)
+FILTER_REMOTE = "Sin descargar"
+FILTERS = (FILTER_ALL, FILTER_ATTENTION, FILTER_CHANGES, FILTER_REMOTE)
 
 
 def matches_filter(status: RepoStatus, filtro: str) -> bool:
+    if filtro == FILTER_REMOTE:
+        return False
     if filtro == FILTER_ATTENTION:
         return status.is_blocked or status.state is RepoState.NO_UPSTREAM
     if filtro == FILTER_CHANGES:
@@ -114,14 +121,65 @@ class RepoRow(ctk.CTkFrame):
         self.configure(fg_color=theme.CARD_BG)
 
 
+class RemoteRow(ctk.CTkFrame):
+    """Un repositorio de GitHub que no está en este equipo, con su botón."""
+
+    def __init__(self, master, repo: GitHubRepo, on_clone, usuario: str = "", **kwargs):
+        super().__init__(master, fg_color=theme.CARD_BG, corner_radius=8, **kwargs)
+        self.repo = repo
+        self.on_clone = on_clone
+        self.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self, text="○", width=18, font=ctk.CTkFont(size=18),
+            text_color=theme.TEXT_MUTED,
+        ).grid(row=0, column=0, rowspan=2, padx=(12, 6), pady=10)
+
+        # Sin emojis: la fuente de Tk en Windows no siempre los tiene.
+        ctk.CTkLabel(
+            self, text=repo.name, anchor="w", font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=1, sticky="ew", pady=(10, 0))
+
+        ajeno = repo.owner and usuario and repo.owner.lower() != usuario.lower()
+        partes = [etiqueta for etiqueta in (
+            repo.description[:90] + ("…" if len(repo.description) > 90 else ""),
+            "privado" if repo.private else "",
+            f"de {repo.owner}" if ajeno else "",
+            f"último cambio {human_date(repo.pushed_at)}" if repo.pushed_at else "",
+        ) if etiqueta]
+        ctk.CTkLabel(
+            self, text=" · ".join(partes) or repo.full_name, anchor="w",
+            font=ctk.CTkFont(size=12), text_color=theme.TEXT_MUTED,
+        ).grid(row=1, column=1, sticky="ew", pady=(0, 10))
+
+        self.boton = ctk.CTkButton(
+            self, text="⬇  Traer", width=110, height=32,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=theme.SYNC_COLOR, hover_color=theme.SYNC_HOVER, command=self._traer,
+        )
+        self.boton.grid(row=0, column=2, rowspan=2, padx=12)
+
+    def _traer(self) -> None:
+        # Solo cambia de aspecto si la descarga ha empezado de verdad: si hay
+        # otra operación en marcha, la ventana no la acepta.
+        if self.on_clone(self.repo):
+            self.boton.configure(
+                text="Descargando…", state="disabled",
+                fg_color=theme.DISABLED_BG, text_color_disabled=theme.DISABLED_TEXT,
+            )
+
+
 class RepoListView(ctk.CTkFrame):
     """El contenedor con scroll de todas las filas."""
 
-    def __init__(self, master, on_select, **kwargs):
+    def __init__(self, master, on_select, on_clone=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self.on_select = on_select
+        self.on_clone = on_clone or (lambda _repo: False)
         self.filtro = FILTER_ALL
         self.statuses: list[RepoStatus] = []
+        self.remotos: list[GitHubRepo] = []
+        self.usuario = ""   # para marcar los repos de organizaciones
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -153,8 +211,13 @@ class RepoListView(ctk.CTkFrame):
         self.filtro = valor
         self.render()
 
-    def set_statuses(self, statuses: list[RepoStatus]) -> None:
+    def set_statuses(
+        self, statuses: list[RepoStatus], remotos: "list[GitHubRepo] | None" = None
+    ) -> None:
+        """Proyectos de este equipo y, si se indican, los que solo están en GitHub."""
         self.statuses = list(statuses)
+        if remotos is not None:
+            self.remotos = sorted(remotos, key=lambda r: r.name.lower())
         self.render()
 
     def render(self) -> None:
@@ -165,24 +228,48 @@ class RepoListView(ctk.CTkFrame):
         # Lo que necesita atención, primero.
         visibles.sort(key=lambda s: (not s.is_blocked, s.state is RepoState.UP_TO_DATE, s.name.lower()))
 
+        remotos = self.remotos if self.filtro in (FILTER_ALL, FILTER_REMOTE) else []
+
         atencion = sum(1 for s in self.statuses if s.is_blocked)
         self.cuenta.configure(
             text=f"{len(self.statuses)} proyectos"
                  + (f" · {atencion} necesitan tu atención" if atencion else "")
+                 + (f" · {len(self.remotos)} sin descargar" if self.remotos else "")
         )
 
-        if not visibles:
-            mensaje = (
-                "Todavía no hay proyectos. Elige tu carpeta de proyectos en Ajustes."
-                if not self.statuses else "Ningún proyecto encaja con este filtro."
-            )
+        if not visibles and not remotos:
+            if self.filtro == FILTER_REMOTE:
+                mensaje = "Tienes en este equipo todos tus repositorios de GitHub."
+            elif not self.statuses:
+                mensaje = "Todavía no hay proyectos. Elige tu carpeta de proyectos en Ajustes."
+            else:
+                mensaje = "Ningún proyecto encaja con este filtro."
             ctk.CTkLabel(
                 self.lista, text=mensaje, font=ctk.CTkFont(size=13),
                 text_color=theme.TEXT_MUTED,
             ).grid(row=0, column=0, pady=40)
             return
 
-        for fila, status in enumerate(visibles):
+        fila = 0
+        for status in visibles:
             RepoRow(self.lista, status, self.on_select).grid(
                 row=fila, column=0, sticky="ew", pady=3, padx=2
             )
+            fila += 1
+
+        if remotos:
+            ctk.CTkLabel(
+                self.lista, text=f"En GitHub, sin descargar  ({len(remotos)})", anchor="w",
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).grid(row=fila, column=0, sticky="w", padx=4, pady=(18 if visibles else 4, 0))
+            ctk.CTkLabel(
+                self.lista, anchor="w", font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED,
+                text="«Traer» crea una carpeta con el nombre del repositorio en tu carpeta "
+                     "de proyectos y descarga todo dentro.",
+            ).grid(row=fila + 1, column=0, sticky="w", padx=4, pady=(0, 6))
+            fila += 2
+            for repo in remotos:
+                RemoteRow(self.lista, repo, self.on_clone, self.usuario).grid(
+                    row=fila, column=0, sticky="ew", pady=3, padx=2
+                )
+                fila += 1

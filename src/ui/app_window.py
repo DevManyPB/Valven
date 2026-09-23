@@ -15,7 +15,7 @@ import customtkinter as ctk
 from .. import analyzer, auth, config as config_module, github_api, safety, startup, sync_engine
 from ..analyzer import RepoStatus
 from ..logger import get_logger
-from . import call_on_ui_thread, descargar_avatar, etiqueta_segura, theme
+from . import call_on_ui_thread, descargar_avatar, etiqueta_segura, ruta_corta, theme
 from .login_view import LoginView
 from .preview_dialog import ask
 from .repo_detail_view import RepoDetailView
@@ -116,7 +116,7 @@ class VaivenApp(ctk.CTk):
         self._barra_superior(marco)
         self._acciones(marco)
 
-        self.lista = RepoListView(marco, on_select=self._abrir_detalle)
+        self.lista = RepoListView(marco, on_select=self._abrir_detalle, on_clone=self.traer)
         self.lista.grid(row=2, column=0, sticky="nsew", padx=24, pady=(4, 4))
 
         self._barra_inferior(marco)
@@ -304,6 +304,9 @@ class VaivenApp(ctk.CTk):
     def _pintar_usuario(self, usuario: github_api.GitHubUser, foto=None) -> None:
         self.user = usuario
         self.usuario_label.configure(text=usuario.display_name)
+        if getattr(self, "lista", None) is not None:
+            self.lista.usuario = usuario.login
+            self.lista.render()
         self.equipo_label.configure(text=self._texto_equipo())
         if foto is not None:
             # La referencia se guarda: si no, Tk borra la imagen al instante.
@@ -352,26 +355,30 @@ class VaivenApp(ctk.CTk):
         ]
 
     def revisar_estado(self) -> None:
-        """Botón «↻ Revisar estado» (sección 9.1)."""
-        rutas = self._repos_locales()
-        if not rutas:
-            self.lista.set_statuses([])
-            self._estado(
-                "No se han encontrado proyectos en esa carpeta."
-                if self.config_data.root_folder else
-                "Elige tu carpeta de proyectos en Ajustes."
-            )
+        """Botón «↻ Revisar estado» (sección 9.1).
+
+        Analiza los proyectos de este equipo y, con la sesión iniciada, busca
+        en GitHub los que todavía no están aquí para ofrecer traerlos.
+        """
+        if not self.config_data.root_folder:
+            self.lista.set_statuses([], [])
+            self._estado("Elige tu carpeta de proyectos en Ajustes.")
             return
+        rutas = self._repos_locales()
+
+        def trabajo():
+            statuses = analyzer.analyze_all(rutas, token=self.token, on_progress=self._avance)
+            return statuses, self._repos_de_github(statuses)
 
         self._en_segundo_plano(
-            lambda: analyzer.analyze_all(rutas, token=self.token, on_progress=self._avance),
-            self._estado_listo,
-            f"Revisando {len(rutas)} proyectos…",
+            trabajo, self._estado_listo,
+            f"Revisando {len(rutas)} proyectos…" if rutas else "Buscando tus repositorios en GitHub…",
         )
 
-    def _estado_listo(self, statuses: list[RepoStatus]) -> None:
+    def _estado_listo(self, resultado) -> None:
+        statuses, remotos = resultado
         self.statuses = statuses
-        self.lista.set_statuses(statuses)
+        self.lista.set_statuses(statuses, remotos or [])
         atencion = [s for s in statuses if s.is_blocked]
         pendientes = [s for s in statuses if s.behind]
         partes = []
@@ -384,6 +391,14 @@ class VaivenApp(ctk.CTk):
             partes.append(
                 f"{len(atencion)} necesita{'n' if len(atencion) != 1 else ''} tu atención"
             )
+        if remotos:
+            partes.append(
+                f"{len(remotos)} en GitHub sin descargar"
+            )
+        elif remotos is None and self.token:
+            partes.append("no se pudo consultar la lista de GitHub")
+        if not statuses and not remotos:
+            partes.append("No se han encontrado proyectos en esa carpeta")
         self._estado(
             " · ".join(partes) or "Todo está al día.",
             color=theme.DANGER if atencion else theme.TEXT_MUTED,
@@ -429,21 +444,65 @@ class VaivenApp(ctk.CTk):
 
         self._en_segundo_plano(trabajo, self._confirmar_y_ejecutar, "Mirando qué hay en GitHub…")
 
-    def _buscar_lo_que_falta(self, statuses: list[RepoStatus]) -> list[sync_engine.MissingRepo]:
-        """Proyectos que están en GitHub y no en este equipo (sección 8)."""
+    def _repos_de_github(self, statuses: list[RepoStatus]) -> list[github_api.GitHubRepo] | None:
+        """Repositorios de GitHub que no están en este equipo (sección 8).
+
+        Se comparan por la dirección de ``origin``, no solo por el nombre de
+        la carpeta. ``None`` si no se pudo consultar GitHub.
+        """
         if not self.token:
             return []
         try:
             remotos = github_api.GitHubClient(self.token).list_repos()
         except Exception as exc:
             log.info("no se pudo consultar la lista de GitHub: %s", exc)
-            return []
-        locales = {s.name for s in statuses}
+            return None
         return [
-            sync_engine.MissingRepo(repo.name, repo.clone_url, repo.private)
-            for repo in github_api.missing_locally(remotos, locales)
+            repo for repo in github_api.missing_locally(
+                remotos, {s.name for s in statuses}, [s.remote_url for s in statuses]
+            )
             if not self.config_data.is_excluded(repo.name)
         ]
+
+    def _buscar_lo_que_falta(self, statuses: list[RepoStatus]) -> list[sync_engine.MissingRepo]:
+        """Lo mismo, en el formato de la vista previa de «Sincronizar todo»."""
+        return [
+            sync_engine.MissingRepo(repo.name, repo.clone_url, repo.private)
+            for repo in self._repos_de_github(statuses) or []
+        ]
+
+    # --- traer un repositorio de GitHub ------------------------------------
+
+    def traer(self, repo: github_api.GitHubRepo) -> bool:
+        """Botón «⬇ Traer» de un repo que solo está en GitHub (sección 8).
+
+        Crea ``<carpeta de proyectos>/<nombre>`` y lo clona dentro. Clonar
+        nunca toca nada existente: si ya hay una carpeta con ese nombre, no
+        se hace nada. Devuelve si la descarga ha empezado.
+        """
+        raiz = self.config_data.root_folder
+        if not raiz:
+            self._estado("Elige tu carpeta de proyectos en Ajustes.")
+            return False
+        if self._ocupado:
+            self._estado("Espera a que termine la operación en marcha.")
+            return False
+        pendiente = sync_engine.MissingRepo(repo.name, repo.clone_url, repo.private)
+        self._en_segundo_plano(
+            lambda: sync_engine.clone_repo(pendiente, raiz, token=self.token),
+            lambda resultado: self._traido(resultado, Path(raiz) / repo.name),
+            f"Descargando «{repo.name}»…",
+        )
+        return True
+
+    def _traido(self, resultado: sync_engine.RepoResult, destino: Path) -> None:
+        if resultado.ok:
+            self._estado(
+                f"«{resultado.name}» descargado en {ruta_corta(destino, maximo=60)}", color=theme.SUCCESS
+            )
+        else:
+            self._estado(f"«{resultado.name}»: {resultado.message}", color=theme.DANGER)
+        self.after(1500, self.revisar_estado)
 
     def _confirmar_y_ejecutar(self, plan: sync_engine.Plan) -> None:
         """Vista previa obligatoria antes de tocar nada (6.5)."""

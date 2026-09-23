@@ -302,7 +302,7 @@ inserta texto de Git sin pasarlo por ese filtro.
 
 ## Las pruebas
 
-332 pruebas, sin tocar GitHub ni ningún repositorio real.
+341 pruebas, sin tocar GitHub ni ningún repositorio real.
 
 ```
 tests/conftest.py            dos clones de un remoto bare local = dos equipos

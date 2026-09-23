@@ -517,3 +517,43 @@ def test_el_login_por_codigo_sigue_funcionando_como_reserva():
     })])
     codigo = auth.request_device_code(sesion)
     assert codigo.user_code == "ABCD-1234"
+
+
+# --- qué repos de GitHub faltan en este equipo -----------------------------
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/Jhon/Web.git",
+    "https://github.com/jhon/web",
+    "git@github.com:jhon/web.git",
+    "ssh://git@github.com/jhon/web.git",
+    "https://x-access-token:abc@github.com/jhon/web.git",
+])
+def test_la_clave_de_un_repo_no_depende_de_la_forma_de_la_direccion(url):
+    assert github_api.repo_key(url) == "jhon/web"
+
+
+def test_la_clave_de_algo_que_no_es_github_es_none():
+    assert github_api.repo_key("https://gitlab.com/jhon/web.git") is None
+    assert github_api.repo_key(None) is None
+
+
+def test_una_carpeta_con_otro_nombre_cuenta_como_descargado():
+    """«mi-web» apunta a jhon/web: no hay que ofrecer descargar «web» otra vez."""
+    remotos = [
+        github_api.GitHubRepo("web", "jhon/web", "https://github.com/jhon/web.git"),
+        github_api.GitHubRepo("api", "jhon/api", "https://github.com/jhon/api.git"),
+    ]
+    faltan = github_api.missing_locally(
+        remotos, {"mi-web"}, ["git@github.com:jhon/web.git", None]
+    )
+    assert [r.name for r in faltan] == ["api"]
+
+
+def test_la_lista_de_github_trae_descripcion_y_fecha():
+    sesion = SesionFalsa([RespuestaFalsa([{
+        "name": "web", "full_name": "jhon/web", "clone_url": "https://github.com/jhon/web.git",
+        "description": "Mi web", "pushed_at": "2026-09-20T10:00:00Z", "owner": {"login": "jhon"},
+    }])])
+    repos = github_api.GitHubClient("t", session=sesion).list_repos()
+    assert repos[0].description == "Mi web"
+    assert repos[0].pushed_at.year == 2026

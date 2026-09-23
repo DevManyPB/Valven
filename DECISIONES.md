@@ -641,3 +641,23 @@ Además: foto de perfil real (sin enviar la sesión: es una imagen pública),
 `@usuario` junto al equipo, barra de progreso con cifras en vez de girar sin
 fin, icono en la pantalla de inicio de sesión, rutas largas acortadas por la
 izquierda y atajos de teclado.
+
+### D47. Los repos que solo están en GitHub, en la lista principal
+
+**Decisión.** «Revisar estado» consulta también la lista de GitHub y enseña,
+debajo de los proyectos del equipo, los que faltan, cada uno con un botón
+«⬇ Traer» que clona en `<carpeta de proyectos>/<nombre>`. Hay un filtro
+«Sin descargar». Antes solo aparecían como casillas escondidas en la vista
+previa de «Sincronizar todo», que sigue ofreciéndolos igual.
+
+Traer no pide confirmación, a diferencia de las acciones masivas: clonar
+solo crea una carpeta nueva y `clone_repo` se niega si ya existe (D45), así
+que no hay nada que se pueda perder.
+
+**Se compara por la dirección, no por el nombre.** `missing_locally`
+considera descargado un repo si alguna carpeta tiene su `origin` apuntando a
+él (`github_api.repo_key` entiende HTTPS, SSH y direcciones con credenciales).
+Antes se comparaba solo el nombre de la carpeta: una carpeta `mi-web` que
+apuntaba a `web` hacía que se ofreciera descargar `web` otra vez, duplicado.
+El nombre sigue contando, porque clonar encima de una carpeta con ese nombre
+no se puede.

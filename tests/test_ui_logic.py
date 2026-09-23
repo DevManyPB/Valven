@@ -518,3 +518,12 @@ def test_los_botones_con_borde_siguen_al_tema():
     for archivo in (RAIZ / "src" / "ui").glob("*.py"):
         texto = archivo.read_text(encoding="utf-8")
         assert 'fg_color="transparent", border_width' not in texto, archivo.name
+
+
+def test_el_filtro_sin_descargar_no_muestra_proyectos_locales(sandbox):
+    from src.analyzer import analyze_repo
+    from src.ui.repo_list_view import FILTER_ALL, FILTER_REMOTE, FILTERS, matches_filter
+    estado = analyze_repo(sandbox.b)
+    assert FILTER_REMOTE in FILTERS
+    assert not matches_filter(estado, FILTER_REMOTE)
+    assert matches_filter(estado, FILTER_ALL)

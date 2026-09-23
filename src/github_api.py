@@ -6,7 +6,9 @@ hacen siempre con Git, a través de ``git_ops.py``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from .auth import AuthError, SessionExpired
 from .logger import get_logger
@@ -44,6 +46,8 @@ class GitHubRepo:
     archived: bool = False
     default_branch: str = "main"
     owner: str = ""
+    description: str = ""
+    pushed_at: datetime | None = None
 
     @property
     def is_owned_by(self) -> str:
@@ -124,6 +128,8 @@ class GitHubClient:
                     archived=bool(datos.get("archived")),
                     default_branch=datos.get("default_branch") or "main",
                     owner=(datos.get("owner") or {}).get("login", ""),
+                    description=datos.get("description") or "",
+                    pushed_at=_fecha(datos.get("pushed_at")),
                 )
                 if repo.fork and not include_forks:
                     continue
@@ -144,7 +150,44 @@ class GitHubClient:
             return False
 
 
-def missing_locally(remote_repos: list[GitHubRepo], local_names: set[str]) -> list[GitHubRepo]:
-    """Repositorios que están en GitHub y no en este equipo (sección 8)."""
+def _fecha(valor) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(valor).replace("Z", "+00:00")) if valor else None
+    except ValueError:
+        return None
+
+
+_GITHUB_URL = re.compile(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", re.IGNORECASE)
+
+
+def repo_key(url: str | None) -> str | None:
+    """``dueño/nombre`` en minúsculas a partir de cualquier dirección de GitHub.
+
+    Sirve para las formas HTTPS, SSH (``git@github.com:dueño/repo.git``) y
+    con credenciales incrustadas; ``None`` si no es de GitHub.
+    """
+    encontrado = _GITHUB_URL.search(url or "")
+    if not encontrado:
+        return None
+    return f"{encontrado.group(1)}/{encontrado.group(2)}".lower()
+
+
+def missing_locally(
+    remote_repos: list[GitHubRepo],
+    local_names: set[str],
+    local_remotes: "set[str] | list[str | None]" = (),
+) -> list[GitHubRepo]:
+    """Repositorios que están en GitHub y no en este equipo (sección 8).
+
+    Un repo está en el equipo si alguna carpeta apunta a él (``local_remotes``,
+    las direcciones de ``origin``), aunque la carpeta se llame distinto. El
+    nombre de la carpeta cuenta también: clonar encima de una carpeta con ese
+    nombre no se puede, así que ofrecerlo solo llevaría a un error.
+    """
     minusculas = {name.lower() for name in local_names}
-    return [repo for repo in remote_repos if repo.name.lower() not in minusculas]
+    claves = {clave for clave in map(repo_key, local_remotes) if clave}
+    return [
+        repo for repo in remote_repos
+        if repo.name.lower() not in minusculas
+        and (repo_key(repo.clone_url) or repo.full_name.lower()) not in claves
+    ]
